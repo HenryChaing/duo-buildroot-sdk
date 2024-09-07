@@ -749,17 +749,6 @@
 	};
 
 #if (CVIMMAP_FRAMEBUFFER_SIZE > 0)
-	reserved-memory {
-	  #size-cells = <0x2>;
-	  #address-cells = <0x2>;
-	  ranges;
-
-		fb_reserved: cvifb {
-			alloc-ranges = <0x0 CVIMMAP_FRAMEBUFFER_ADDR 0 CVIMMAP_FRAMEBUFFER_SIZE>;
-			size = <0x0 CVIMMAP_FRAMEBUFFER_SIZE>;
-		};
-	};
-
 	cvifb {
 		compatible = "cvitek,fb";
 		memory-region = <&fb_reserved>;
@@ -767,6 +756,7 @@
 		reg-names = "disp";
 	};
 #endif
+
 	dwa {
 		compatible = "cvitek,dwa";
 		reg = <0x0 0x0a0c0000 0x0 0x1000>;
@@ -827,6 +817,32 @@
 		compatible = "cvitek,rtos_cmdqu";
 		reg = <0x0 0x01900000 0x0 0x1000>;
 		reg-names = "mailbox";
+	};
+
+	reserved-memory {
+	  	#address-cells = <0x2>;
+		#size-cells = <0x2>;
+		ranges;
+
+		rpmsg_reserved: rpmsg@8fff0000 {
+			no-map;
+			reg = <0x0 0x8fff0000 0x0 0x100000>;
+		};
+
+// #if (CVIMMAP_FRAMEBUFFER_SIZE > 0)
+		fb_reserved: cvifb {
+			alloc-ranges = <0x0 CVIMMAP_FRAMEBUFFER_ADDR 0 CVIMMAP_FRAMEBUFFER_SIZE>;
+			size = <0x0 CVIMMAP_FRAMEBUFFER_SIZE>;
+		};
+// #endif
+
+	};
+
+	rpmsg: rpmsg {
+		compatible = "cvitek,rpmsg";
+		vdev-nums = <1>;
+		reg = <0x0 0x8fff0000 0x0 0x100000>;
+		status = "okay";
 	};
 
 	usb: usb@04340000 {

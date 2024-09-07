@@ -17,9 +17,15 @@
 		#address-cells = <0x2>;
 		ranges;
 
+		rpmsg_reserved: rpmsg@8fff0000 {
+			no-map;
+			reg = <0x0 0x8fff0000 0x0 0x100000>;
+		};
+
 		ion_reserved: ion {
 			compatible = "ion-region";
 			size = <0x0 CVIMMAP_ION_SIZE>;
 		};
+
 	};
 };

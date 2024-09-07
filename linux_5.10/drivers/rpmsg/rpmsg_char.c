@@ -1,583 +1,651 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2016, Linaro Ltd.
- * Copyright (c) 2012, Michal Simek <monstr@monstr.eu>
- * Copyright (c) 2012, PetaLogix
- * Copyright (c) 2011, Texas Instruments, Inc.
- * Copyright (c) 2011, Google, Inc.
+ * Copyright (C) 2015 Freescale Semiconductor, Inc.
+ * Copyright 2017 NXP
  *
- * Based on rpmsg performance statistics driver by Michal Simek, which in turn
- * was based on TI & Google OMX rpmsg driver.
+ * derived from the omap-rpmsg implementation.
+ *
+ * The code contained herein is licensed under the GNU General Public
+ * License. You may obtain a copy of the GNU General Public License
+ * Version 2 or later at the following locations:
+ *
+ * http://www.opensource.org/licenses/gpl-license.html
+ * http://www.gnu.org/copyleft/gpl.html
  */
-#include <linux/cdev.h>
-#include <linux/device.h>
-#include <linux/fs.h>
-#include <linux/idr.h>
-#include <linux/kernel.h>
+
+#include <linux/clk.h>
+#include <linux/err.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/poll.h>
+#include <linux/notifier.h>
+#include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
+#include <linux/platform_device.h>
 #include <linux/rpmsg.h>
-#include <linux/skbuff.h>
 #include <linux/slab.h>
-#include <linux/uaccess.h>
-#include <uapi/linux/rpmsg.h>
+#include <linux/virtio.h>
+#include <linux/virtio_config_imx.h>
+#include <linux/virtio_ids.h>
+#include <linux/virtio_ring.h>
+#include <linux/imx_rpmsg.h>
+#include <linux/imx_mu.h>
+#include <asm/io.h>
+#include <asm-generic/io.h>
+#include <linux/rtos_cmdqu.h>
+#include <linux/miscdevice.h>
 
-#include "rpmsg_internal.h"
+enum imx_rpmsg_variants {
+	IMX6SX,
+	IMX7D,
+	IMX7ULP,
+};
+static enum imx_rpmsg_variants variant;
 
-#define RPMSG_DEV_MAX	(MINORMASK + 1)
-
-static dev_t rpmsg_major;
-static struct class *rpmsg_class;
-
-static DEFINE_IDA(rpmsg_ctrl_ida);
-static DEFINE_IDA(rpmsg_ept_ida);
-static DEFINE_IDA(rpmsg_minor_ida);
-
-#define dev_to_eptdev(dev) container_of(dev, struct rpmsg_eptdev, dev)
-#define cdev_to_eptdev(i_cdev) container_of(i_cdev, struct rpmsg_eptdev, cdev)
-
-#define dev_to_ctrldev(dev) container_of(dev, struct rpmsg_ctrldev, dev)
-#define cdev_to_ctrldev(i_cdev) container_of(i_cdev, struct rpmsg_ctrldev, cdev)
-
-/**
- * struct rpmsg_ctrldev - control device for instantiating endpoint devices
- * @rpdev:	underlaying rpmsg device
- * @cdev:	cdev for the ctrl device
- * @dev:	device for the ctrl device
- */
-struct rpmsg_ctrldev {
-	struct rpmsg_device *rpdev;
-	struct cdev cdev;
-	struct device dev;
+struct imx_virdev {
+	struct virtio_device vdev;
+	unsigned int vring[2];
+	struct virtqueue *vq[2];
+	int base_vq_id;
+	int num_of_vqs;
+	struct notifier_block nb;
 };
 
-/**
- * struct rpmsg_eptdev - endpoint device context
- * @dev:	endpoint device
- * @cdev:	cdev for the endpoint device
- * @rpdev:	underlaying rpmsg device
- * @chinfo:	info used to open the endpoint
- * @ept_lock:	synchronization of @ept modifications
- * @ept:	rpmsg endpoint reference, when open
- * @queue_lock:	synchronization of @queue operations
- * @queue:	incoming message queue
- * @readq:	wait object for incoming queue
- */
-struct rpmsg_eptdev {
-	struct device dev;
-	struct cdev cdev;
-
-	struct rpmsg_device *rpdev;
-	struct rpmsg_channel_info chinfo;
-
-	struct mutex ept_lock;
-	struct rpmsg_endpoint *ept;
-
-	spinlock_t queue_lock;
-	struct sk_buff_head queue;
-	wait_queue_head_t readq;
+struct imx_rpmsg_vproc {
+	char *rproc_name;
+	struct mutex lock;
+	int vdev_nums;
+#define MAX_VDEV_NUMS	7
+	struct imx_virdev ivdev[MAX_VDEV_NUMS];
 };
 
-static int rpmsg_eptdev_destroy(struct device *dev, void *data)
+struct imx_mu_rpmsg_box {
+	const char *name;
+	struct blocking_notifier_head notifier;
+};
+
+static struct imx_mu_rpmsg_box mu_rpmsg_box = {
+	.name	= "m4",
+};
+
+#define MAX_NUM 10	/* enlarge it if overflow happen */
+
+static void __iomem *mu_base;
+static u32 m4_message[MAX_NUM];
+static u32 in_idx, out_idx;
+static DEFINE_SPINLOCK(mu_lock);
+static struct delayed_work rpmsg_work;
+
+volatile struct mailbox_set_register *mbox_reg_rpmsg;
+volatile struct mailbox_done_register *mbox_done_reg_rpmsg;
+volatile unsigned long *mailbox_context_rpmsg; // mailbox buffer context is 64 Bytess
+
+/*
+ * For now, allocate 256 buffers of 512 bytes for each side. each buffer
+ * will then have 16B for the msg header and 496B for the payload.
+ * This will require a total space of 256KB for the buffers themselves, and
+ * 3 pages for every vring (the size of the vring depends on the number of
+ * buffers it supports).
+ */
+#define RPMSG_NUM_BUFS		(256)
+#define RPMSG_BUF_SIZE		(512)
+
+/*
+ * The alignment between the consumer and producer parts of the vring.
+ * Note: this is part of the "wire" protocol. If you change this, you need
+ * to update your BIOS image as well
+ */
+#define RPMSG_VRING_ALIGN	(4096)
+
+/* With 256 buffers, our vring will occupy 3 pages */
+#define RPMSG_RING_SIZE	((DIV_ROUND_UP(vring_size(RPMSG_NUM_BUFS, \
+				RPMSG_VRING_ALIGN), PAGE_SIZE)) * PAGE_SIZE)
+
+#define to_imx_virdev(vd) container_of(vd, struct imx_virdev, vdev)
+#define to_imx_rpdev(vd, id) container_of(vd, struct imx_rpmsg_vproc, ivdev[id])
+
+struct imx_rpmsg_vq_info {
+	__u16 num;	/* number of entries in the virtio_ring */
+	__u16 vq_id;	/* a globaly unique index of this virtqueue */
+	void *addr;	/* address where we mapped the virtio ring */
+	struct imx_rpmsg_vproc *rpdev;
+};
+
+static u64 imx_rpmsg_get_features(struct virtio_device *vdev)
 {
-	struct rpmsg_eptdev *eptdev = dev_to_eptdev(dev);
+	/* VIRTIO_RPMSG_F_NS has been made private */
+	return 1 << 0;
+}
 
-	mutex_lock(&eptdev->ept_lock);
-	if (eptdev->ept) {
-		rpmsg_destroy_ept(eptdev->ept);
-		eptdev->ept = NULL;
+static int imx_rpmsg_finalize_features(struct virtio_device *vdev)
+{
+	/* Give virtio_ring a chance to accept features */
+	vring_transport_features(vdev);
+	return 0;
+}
+
+/*!
+ * This function reads the status from status register.
+ */
+uint32_t MU_ReadStatus(void __iomem *base)
+{
+	uint32_t reg, offset;
+
+	offset = unlikely((readl_relaxed(base) >> 16) == MU_VER_ID_V10)
+			  ? MU_V10_ASR_OFFSET1 : MU_ASR_OFFSET1;
+
+	reg = readl_relaxed(base + offset);
+
+	return reg;
+}
+
+/*
+ * Wait and send message to the other core.
+ */
+void MU_SendMessage(void __iomem *base, uint32_t regIndex, uint32_t msg)
+{
+	uint32_t mask = MU_SR_TE0_MASK1 >> regIndex;
+
+	if (unlikely((readl_relaxed(base) >> 16) == MU_VER_ID_V10)) {
+		/* Wait TX register to be empty. */
+		while (!(readl_relaxed(base + MU_V10_ASR_OFFSET1) & mask))
+			;
+		writel_relaxed(msg, base + MU_V10_ATR0_OFFSET1
+			       + (regIndex * 4));
+	} else {
+		/* Wait TX register to be empty. */
+		while (!(readl_relaxed(base + MU_ASR_OFFSET1) & mask))
+			;
+		writel_relaxed(msg, base + MU_ATR0_OFFSET1  + (regIndex * 4));
 	}
-	mutex_unlock(&eptdev->ept_lock);
-
-	/* wake up any blocked readers */
-	wake_up_interruptible(&eptdev->readq);
-
-	device_del(&eptdev->dev);
-	put_device(&eptdev->dev);
-
-	return 0;
 }
 
-static int rpmsg_ept_cb(struct rpmsg_device *rpdev, void *buf, int len,
-			void *priv, u32 addr)
+
+/*
+ * Wait to receive message from the other core.
+ */
+void MU_ReceiveMsg(void __iomem *base, uint32_t regIndex, uint32_t *msg)
 {
-	struct rpmsg_eptdev *eptdev = priv;
-	struct sk_buff *skb;
+	uint32_t mask = MU_SR_RF0_MASK1 >> regIndex;
 
-	skb = alloc_skb(len, GFP_ATOMIC);
-	if (!skb)
-		return -ENOMEM;
-
-	skb_put_data(skb, buf, len);
-
-	spin_lock(&eptdev->queue_lock);
-	skb_queue_tail(&eptdev->queue, skb);
-	spin_unlock(&eptdev->queue_lock);
-
-	/* wake up any blocking processes, waiting for new data */
-	wake_up_interruptible(&eptdev->readq);
-
-	return 0;
+	if (unlikely((readl_relaxed(base) >> 16) == MU_VER_ID_V10)) {
+		/* Wait RX register to be full. */
+		while (!(readl_relaxed(base + MU_V10_ASR_OFFSET1) & mask))
+			;
+		*msg = readl_relaxed(base + MU_V10_ARR0_OFFSET1
+				     + (regIndex * 4));
+	} else {
+		/* Wait RX register to be full. */
+		while (!(readl_relaxed(base + MU_ASR_OFFSET1) & mask))
+			;
+		*msg = readl_relaxed(base + MU_ARR0_OFFSET1 + (regIndex * 4));
+	}
 }
 
-static int rpmsg_eptdev_open(struct inode *inode, struct file *filp)
+
+/* kick the remote processor, and let it know which virtqueue to poke at */
+static bool imx_rpmsg_notify(struct virtqueue *vq)
 {
-	struct rpmsg_eptdev *eptdev = cdev_to_eptdev(inode->i_cdev);
-	struct rpmsg_endpoint *ept;
-	struct rpmsg_device *rpdev = eptdev->rpdev;
-	struct device *dev = &eptdev->dev;
+	unsigned int mu_rpmsg = 0;
+	struct imx_rpmsg_vq_info *rpvq = vq->priv;
 
-	get_device(dev);
+	mu_rpmsg = rpvq->vq_id << 16;
+	mutex_lock(&rpvq->rpdev->lock);
 
-	ept = rpmsg_create_ept(rpdev, rpmsg_ept_cb, eptdev, eptdev->chinfo);
-	if (!ept) {
-		dev_err(dev, "failed to open %s\n", eptdev->chinfo.name);
-		put_device(dev);
+	/* send the index of the triggered virtqueue as the mu payload */
+	// MU_SendMessage(mu_base, 1, mu_rpmsg);
+	struct cmdqu_t cmd = {0};
+    cmd.param_ptr = mu_rpmsg;
+	rtos_cmdqu_send(&cmd);
+
+	mutex_unlock(&rpvq->rpdev->lock);
+
+	return true;
+}
+
+
+static int imx_mu_rpmsg_callback(struct notifier_block *this,
+					unsigned long index, void *data)
+{
+	u32 mu_msg = (phys_addr_t) data;
+	struct imx_virdev *virdev;
+
+	virdev = container_of(this, struct imx_virdev, nb);
+
+	pr_debug("%s mu_msg: 0x%x\n", __func__, mu_msg);
+	/* ignore vq indices which are clearly not for us */
+	mu_msg = mu_msg >> 16;
+	if (mu_msg < virdev->base_vq_id || mu_msg > virdev->base_vq_id + 1) {
+		pr_debug("mu_msg: 0x%x is invalid\n", mu_msg);
+		return NOTIFY_DONE;
+	}
+
+	mu_msg -= virdev->base_vq_id;
+
+	/*
+	 * Currently both PENDING_MSG and explicit-virtqueue-index
+	 * messaging are supported.
+	 * Whatever approach is taken, at this point 'mu_msg' contains
+	 * the index of the vring which was just triggered.
+	 */
+	if (mu_msg < virdev->num_of_vqs)
+		vring_interrupt(mu_msg, virdev->vq[mu_msg]);
+
+	return NOTIFY_DONE;
+}
+
+int imx_mu_rpmsg_register_nb(const char *name, struct notifier_block *nb)
+{
+	if ((name == NULL) || (nb == NULL))
 		return -EINVAL;
-	}
 
-	eptdev->ept = ept;
-	filp->private_data = eptdev;
-
-	return 0;
-}
-
-static int rpmsg_eptdev_release(struct inode *inode, struct file *filp)
-{
-	struct rpmsg_eptdev *eptdev = cdev_to_eptdev(inode->i_cdev);
-	struct device *dev = &eptdev->dev;
-
-	/* Close the endpoint, if it's not already destroyed by the parent */
-	mutex_lock(&eptdev->ept_lock);
-	if (eptdev->ept) {
-		rpmsg_destroy_ept(eptdev->ept);
-		eptdev->ept = NULL;
-	}
-	mutex_unlock(&eptdev->ept_lock);
-
-	/* Discard all SKBs */
-	skb_queue_purge(&eptdev->queue);
-
-	put_device(dev);
-
-	return 0;
-}
-
-static ssize_t rpmsg_eptdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
-{
-	struct file *filp = iocb->ki_filp;
-	struct rpmsg_eptdev *eptdev = filp->private_data;
-	unsigned long flags;
-	struct sk_buff *skb;
-	int use;
-
-	if (!eptdev->ept)
-		return -EPIPE;
-
-	spin_lock_irqsave(&eptdev->queue_lock, flags);
-
-	/* Wait for data in the queue */
-	if (skb_queue_empty(&eptdev->queue)) {
-		spin_unlock_irqrestore(&eptdev->queue_lock, flags);
-
-		if (filp->f_flags & O_NONBLOCK)
-			return -EAGAIN;
-
-		/* Wait until we get data or the endpoint goes away */
-		if (wait_event_interruptible(eptdev->readq,
-					     !skb_queue_empty(&eptdev->queue) ||
-					     !eptdev->ept))
-			return -ERESTARTSYS;
-
-		/* We lost the endpoint while waiting */
-		if (!eptdev->ept)
-			return -EPIPE;
-
-		spin_lock_irqsave(&eptdev->queue_lock, flags);
-	}
-
-	skb = skb_dequeue(&eptdev->queue);
-	spin_unlock_irqrestore(&eptdev->queue_lock, flags);
-	if (!skb)
-		return -EFAULT;
-
-	use = min_t(size_t, iov_iter_count(to), skb->len);
-	if (copy_to_iter(skb->data, use, to) != use)
-		use = -EFAULT;
-
-	kfree_skb(skb);
-
-	return use;
-}
-
-static ssize_t rpmsg_eptdev_write_iter(struct kiocb *iocb,
-				       struct iov_iter *from)
-{
-	struct file *filp = iocb->ki_filp;
-	struct rpmsg_eptdev *eptdev = filp->private_data;
-	size_t len = iov_iter_count(from);
-	void *kbuf;
-	int ret;
-
-	kbuf = kzalloc(len, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
-
-	if (!copy_from_iter_full(kbuf, len, from)) {
-		ret = -EFAULT;
-		goto free_kbuf;
-	}
-
-	if (mutex_lock_interruptible(&eptdev->ept_lock)) {
-		ret = -ERESTARTSYS;
-		goto free_kbuf;
-	}
-
-	if (!eptdev->ept) {
-		ret = -EPIPE;
-		goto unlock_eptdev;
-	}
-
-	if (filp->f_flags & O_NONBLOCK)
-		ret = rpmsg_trysend(eptdev->ept, kbuf, len);
+	if (!strcmp(mu_rpmsg_box.name, name))
+		blocking_notifier_chain_register(&(mu_rpmsg_box.notifier), nb);
 	else
-		ret = rpmsg_send(eptdev->ept, kbuf, len);
-
-unlock_eptdev:
-	mutex_unlock(&eptdev->ept_lock);
-
-free_kbuf:
-	kfree(kbuf);
-	return ret < 0 ? ret : len;
-}
-
-static __poll_t rpmsg_eptdev_poll(struct file *filp, poll_table *wait)
-{
-	struct rpmsg_eptdev *eptdev = filp->private_data;
-	__poll_t mask = 0;
-
-	if (!eptdev->ept)
-		return EPOLLERR;
-
-	poll_wait(filp, &eptdev->readq, wait);
-
-	if (!skb_queue_empty(&eptdev->queue))
-		mask |= EPOLLIN | EPOLLRDNORM;
-
-	mask |= rpmsg_poll(eptdev->ept, filp, wait);
-
-	return mask;
-}
-
-static long rpmsg_eptdev_ioctl(struct file *fp, unsigned int cmd,
-			       unsigned long arg)
-{
-	struct rpmsg_eptdev *eptdev = fp->private_data;
-
-	if (cmd != RPMSG_DESTROY_EPT_IOCTL)
-		return -EINVAL;
-
-	return rpmsg_eptdev_destroy(&eptdev->dev, NULL);
-}
-
-static const struct file_operations rpmsg_eptdev_fops = {
-	.owner = THIS_MODULE,
-	.open = rpmsg_eptdev_open,
-	.release = rpmsg_eptdev_release,
-	.read_iter = rpmsg_eptdev_read_iter,
-	.write_iter = rpmsg_eptdev_write_iter,
-	.poll = rpmsg_eptdev_poll,
-	.unlocked_ioctl = rpmsg_eptdev_ioctl,
-	.compat_ioctl = compat_ptr_ioctl,
-};
-
-static ssize_t name_show(struct device *dev, struct device_attribute *attr,
-			 char *buf)
-{
-	struct rpmsg_eptdev *eptdev = dev_get_drvdata(dev);
-
-	return sprintf(buf, "%s\n", eptdev->chinfo.name);
-}
-static DEVICE_ATTR_RO(name);
-
-static ssize_t src_show(struct device *dev, struct device_attribute *attr,
-			 char *buf)
-{
-	struct rpmsg_eptdev *eptdev = dev_get_drvdata(dev);
-
-	return sprintf(buf, "%d\n", eptdev->chinfo.src);
-}
-static DEVICE_ATTR_RO(src);
-
-static ssize_t dst_show(struct device *dev, struct device_attribute *attr,
-			 char *buf)
-{
-	struct rpmsg_eptdev *eptdev = dev_get_drvdata(dev);
-
-	return sprintf(buf, "%d\n", eptdev->chinfo.dst);
-}
-static DEVICE_ATTR_RO(dst);
-
-static struct attribute *rpmsg_eptdev_attrs[] = {
-	&dev_attr_name.attr,
-	&dev_attr_src.attr,
-	&dev_attr_dst.attr,
-	NULL
-};
-ATTRIBUTE_GROUPS(rpmsg_eptdev);
-
-static void rpmsg_eptdev_release_device(struct device *dev)
-{
-	struct rpmsg_eptdev *eptdev = dev_to_eptdev(dev);
-
-	ida_simple_remove(&rpmsg_ept_ida, dev->id);
-	ida_simple_remove(&rpmsg_minor_ida, MINOR(eptdev->dev.devt));
-	cdev_del(&eptdev->cdev);
-	kfree(eptdev);
-}
-
-static int rpmsg_eptdev_create(struct rpmsg_ctrldev *ctrldev,
-			       struct rpmsg_channel_info chinfo)
-{
-	struct rpmsg_device *rpdev = ctrldev->rpdev;
-	struct rpmsg_eptdev *eptdev;
-	struct device *dev;
-	int ret;
-
-	eptdev = kzalloc(sizeof(*eptdev), GFP_KERNEL);
-	if (!eptdev)
-		return -ENOMEM;
-
-	dev = &eptdev->dev;
-	eptdev->rpdev = rpdev;
-	eptdev->chinfo = chinfo;
-
-	mutex_init(&eptdev->ept_lock);
-	spin_lock_init(&eptdev->queue_lock);
-	skb_queue_head_init(&eptdev->queue);
-	init_waitqueue_head(&eptdev->readq);
-
-	device_initialize(dev);
-	dev->class = rpmsg_class;
-	dev->parent = &ctrldev->dev;
-	dev->groups = rpmsg_eptdev_groups;
-	dev_set_drvdata(dev, eptdev);
-
-	cdev_init(&eptdev->cdev, &rpmsg_eptdev_fops);
-	eptdev->cdev.owner = THIS_MODULE;
-
-	ret = ida_simple_get(&rpmsg_minor_ida, 0, RPMSG_DEV_MAX, GFP_KERNEL);
-	if (ret < 0)
-		goto free_eptdev;
-	dev->devt = MKDEV(MAJOR(rpmsg_major), ret);
-
-	ret = ida_simple_get(&rpmsg_ept_ida, 0, 0, GFP_KERNEL);
-	if (ret < 0)
-		goto free_minor_ida;
-	dev->id = ret;
-	dev_set_name(dev, "rpmsg%d", ret);
-
-	ret = cdev_add(&eptdev->cdev, dev->devt, 1);
-	if (ret)
-		goto free_ept_ida;
-
-	/* We can now rely on the release function for cleanup */
-	dev->release = rpmsg_eptdev_release_device;
-
-	ret = device_add(dev);
-	if (ret) {
-		dev_err(dev, "device_add failed: %d\n", ret);
-		put_device(dev);
-	}
-
-	return ret;
-
-free_ept_ida:
-	ida_simple_remove(&rpmsg_ept_ida, dev->id);
-free_minor_ida:
-	ida_simple_remove(&rpmsg_minor_ida, MINOR(dev->devt));
-free_eptdev:
-	put_device(dev);
-	kfree(eptdev);
-
-	return ret;
-}
-
-static int rpmsg_ctrldev_open(struct inode *inode, struct file *filp)
-{
-	struct rpmsg_ctrldev *ctrldev = cdev_to_ctrldev(inode->i_cdev);
-
-	get_device(&ctrldev->dev);
-	filp->private_data = ctrldev;
+		return -ENOENT;
 
 	return 0;
 }
 
-static int rpmsg_ctrldev_release(struct inode *inode, struct file *filp)
+int imx_mu_rpmsg_unregister_nb(const char *name, struct notifier_block *nb)
 {
-	struct rpmsg_ctrldev *ctrldev = cdev_to_ctrldev(inode->i_cdev);
+	if ((name == NULL) || (nb == NULL))
+		return -EINVAL;
 
-	put_device(&ctrldev->dev);
+	if (!strcmp(mu_rpmsg_box.name, name))
+		blocking_notifier_chain_unregister(&(mu_rpmsg_box.notifier),
+				nb);
+	else
+		return -ENOENT;
 
 	return 0;
 }
 
-static long rpmsg_ctrldev_ioctl(struct file *fp, unsigned int cmd,
-				unsigned long arg)
+static struct virtqueue *rp_find_vq(struct virtio_device *vdev,
+				    unsigned int index,
+				    void (*callback)(struct virtqueue *vq),
+				    const char *name)
 {
-	struct rpmsg_ctrldev *ctrldev = fp->private_data;
-	void __user *argp = (void __user *)arg;
-	struct rpmsg_endpoint_info eptinfo;
-	struct rpmsg_channel_info chinfo;
+	struct imx_virdev *virdev = to_imx_virdev(vdev);
+	struct imx_rpmsg_vproc *rpdev = to_imx_rpdev(virdev,
+						     virdev->base_vq_id / 2);
+	struct imx_rpmsg_vq_info *rpvq;
+	struct virtqueue *vq;
+	int err;
 
-	if (cmd != RPMSG_CREATE_EPT_IOCTL)
-		return -EINVAL;
+	rpvq = kmalloc(sizeof(*rpvq), GFP_KERNEL);
+	if (!rpvq) {
+		pr_info("rpmsg_char 278\n");
+		return ERR_PTR(-ENOMEM);
+	}
+		
 
-	if (copy_from_user(&eptinfo, argp, sizeof(eptinfo)))
-		return -EFAULT;
+	/* ioremap'ing normal memory, so we cast away sparse's complaints */
+	//rpvq->addr = (__force void *) ioremap_nocache(virdev->vring[index],
+	// 						RPMSG_RING_SIZE);
+	rpvq->addr = (__force void *) ioremap(virdev->vring[index],
+	 						RPMSG_RING_SIZE);
 
-	memcpy(chinfo.name, eptinfo.name, RPMSG_NAME_SIZE);
-	chinfo.name[RPMSG_NAME_SIZE-1] = '\0';
-	chinfo.src = eptinfo.src;
-	chinfo.dst = eptinfo.dst;
-
-	return rpmsg_eptdev_create(ctrldev, chinfo);
-};
-
-static const struct file_operations rpmsg_ctrldev_fops = {
-	.owner = THIS_MODULE,
-	.open = rpmsg_ctrldev_open,
-	.release = rpmsg_ctrldev_release,
-	.unlocked_ioctl = rpmsg_ctrldev_ioctl,
-	.compat_ioctl = compat_ptr_ioctl,
-};
-
-static void rpmsg_ctrldev_release_device(struct device *dev)
-{
-	struct rpmsg_ctrldev *ctrldev = dev_to_ctrldev(dev);
-
-	ida_simple_remove(&rpmsg_ctrl_ida, dev->id);
-	ida_simple_remove(&rpmsg_minor_ida, MINOR(dev->devt));
-	cdev_del(&ctrldev->cdev);
-	kfree(ctrldev);
-}
-
-static int rpmsg_chrdev_probe(struct rpmsg_device *rpdev)
-{
-	struct rpmsg_ctrldev *ctrldev;
-	struct device *dev;
-	int ret;
-
-	ctrldev = kzalloc(sizeof(*ctrldev), GFP_KERNEL);
-	if (!ctrldev)
-		return -ENOMEM;
-
-	ctrldev->rpdev = rpdev;
-
-	dev = &ctrldev->dev;
-	device_initialize(dev);
-	dev->parent = &rpdev->dev;
-	dev->class = rpmsg_class;
-
-	cdev_init(&ctrldev->cdev, &rpmsg_ctrldev_fops);
-	ctrldev->cdev.owner = THIS_MODULE;
-
-	ret = ida_simple_get(&rpmsg_minor_ida, 0, RPMSG_DEV_MAX, GFP_KERNEL);
-	if (ret < 0)
-		goto free_ctrldev;
-	dev->devt = MKDEV(MAJOR(rpmsg_major), ret);
-
-	ret = ida_simple_get(&rpmsg_ctrl_ida, 0, 0, GFP_KERNEL);
-	if (ret < 0)
-		goto free_minor_ida;
-	dev->id = ret;
-	dev_set_name(&ctrldev->dev, "rpmsg_ctrl%d", ret);
-
-	ret = cdev_add(&ctrldev->cdev, dev->devt, 1);
-	if (ret)
-		goto free_ctrl_ida;
-
-	/* We can now rely on the release function for cleanup */
-	dev->release = rpmsg_ctrldev_release_device;
-
-	ret = device_add(dev);
-	if (ret) {
-		dev_err(&rpdev->dev, "device_add failed: %d\n", ret);
-		put_device(dev);
+	if (!rpvq->addr) {
+		err = -ENOMEM;
+		pr_info("rpmsg_char 285\n");
+		goto free_rpvq;
 	}
 
-	dev_set_drvdata(&rpdev->dev, ctrldev);
+	memset(rpvq->addr, 0, RPMSG_RING_SIZE);
 
-	return ret;
+	pr_info("vring%d: phys 0x%x, virt 0x%p\n", index, virdev->vring[index],
+					rpvq->addr);
 
-free_ctrl_ida:
-	ida_simple_remove(&rpmsg_ctrl_ida, dev->id);
-free_minor_ida:
-	ida_simple_remove(&rpmsg_minor_ida, MINOR(dev->devt));
-free_ctrldev:
-	put_device(dev);
-	kfree(ctrldev);
+	vq = vring_new_virtqueue(index, RPMSG_NUM_BUFS, RPMSG_VRING_ALIGN,
+			vdev, true, true, rpvq->addr, imx_rpmsg_notify, callback,
+			name);
+	if (!vq) {
+		pr_info("vring_new_virtqueue failed\n");
+		err = -ENOMEM;
+		goto unmap_vring;
+	}
 
-	return ret;
+	virdev->vq[index] = vq;
+	vq->priv = rpvq;
+	/* system-wide unique id for this virtqueue */
+	rpvq->vq_id = virdev->base_vq_id + index;
+	rpvq->rpdev = rpdev;
+	mutex_init(&rpdev->lock);
+
+	pr_info("rpmsg_char 309\n");
+
+	return vq;
+
+unmap_vring:
+	/* iounmap normal memory, so make sparse happy */
+	iounmap((__force void __iomem *) rpvq->addr);
+	pr_info("rpmsg_char 316\n");
+free_rpvq:
+	kfree(rpvq);
+	pr_info("rpmsg_char 319\n");
+	return ERR_PTR(err);
 }
 
-static void rpmsg_chrdev_remove(struct rpmsg_device *rpdev)
+static void imx_rpmsg_del_vqs(struct virtio_device *vdev)
 {
-	struct rpmsg_ctrldev *ctrldev = dev_get_drvdata(&rpdev->dev);
-	int ret;
+	struct virtqueue *vq, *n;
+	struct imx_virdev *virdev = to_imx_virdev(vdev);
+	struct imx_rpmsg_vproc *rpdev = to_imx_rpdev(virdev,
+						     virdev->base_vq_id / 2);
 
-	/* Destroy all endpoints */
-	ret = device_for_each_child(&ctrldev->dev, NULL, rpmsg_eptdev_destroy);
-	if (ret)
-		dev_warn(&rpdev->dev, "failed to nuke endpoints: %d\n", ret);
+	list_for_each_entry_safe(vq, n, &vdev->vqs, list) {
+		struct imx_rpmsg_vq_info *rpvq = vq->priv;
 
-	device_del(&ctrldev->dev);
-	put_device(&ctrldev->dev);
+		iounmap(rpvq->addr);
+		vring_del_virtqueue(vq);
+		kfree(rpvq);
+	}
+
+	if (&virdev->nb)
+		imx_mu_rpmsg_unregister_nb((const char *)rpdev->rproc_name,
+				&virdev->nb);
 }
 
-static struct rpmsg_driver rpmsg_chrdev_driver = {
-	.probe = rpmsg_chrdev_probe,
-	.remove = rpmsg_chrdev_remove,
-	.drv = {
-		.name = "rpmsg_chrdev",
+// rpmsg_probe -> virtio_find_vqs
+
+static int imx_rpmsg_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
+		       struct virtqueue *vqs[],
+		       vq_callback_t *callbacks[],
+		       const char * const names[])
+{
+	struct imx_virdev *virdev = to_imx_virdev(vdev);
+	struct imx_rpmsg_vproc *rpdev = to_imx_rpdev(virdev,
+						     virdev->base_vq_id / 2);
+	int i, err;
+
+	/* we maintain two virtqueues per remote processor (for RX and TX) */
+	if (nvqs != 2)
+		return -EINVAL;
+
+	for (i = 0; i < nvqs; ++i) {
+		vqs[i] = rp_find_vq(vdev, i, callbacks[i], names[i]);
+		if (IS_ERR(vqs[i])) {
+			err = PTR_ERR(vqs[i]);
+			goto error;
+		}
+	}
+	pr_info("rpmsg_char 373\n");
+	virdev->num_of_vqs = nvqs;
+
+	virdev->nb.notifier_call = imx_mu_rpmsg_callback;
+	imx_mu_rpmsg_register_nb((const char *)rpdev->rproc_name, &virdev->nb);
+
+	return 0;
+
+error:
+	pr_info("rpmsg_char 381\n");
+	imx_rpmsg_del_vqs(vdev);
+	return err;
+}
+
+static void imx_rpmsg_reset(struct virtio_device *vdev)
+{
+	dev_dbg(&vdev->dev, "reset !\n");
+}
+
+static u8 imx_rpmsg_get_status(struct virtio_device *vdev)
+{
+	return 0;
+}
+
+static void imx_rpmsg_set_status(struct virtio_device *vdev, u8 status)
+{
+	dev_dbg(&vdev->dev, "%s new status: %d\n", __func__, status);
+}
+
+static void imx_rpmsg_vproc_release(struct device *dev)
+{
+	/* this handler is provided so driver core doesn't yell at us */
+}
+
+static struct virtio_config_ops imx_rpmsg_config_ops = {
+	.get_features	= imx_rpmsg_get_features,
+	.finalize_features = imx_rpmsg_finalize_features,
+	.find_vqs	= imx_rpmsg_find_vqs,
+	.del_vqs	= imx_rpmsg_del_vqs,
+	.reset		= imx_rpmsg_reset,
+	.set_status	= imx_rpmsg_set_status,
+	.get_status	= imx_rpmsg_get_status,
+};
+
+static struct imx_rpmsg_vproc imx_rpmsg_vprocs[] = {
+	{
+		.rproc_name	= "m4",
 	},
 };
 
-static int rpmsg_char_init(void)
+static const struct of_device_id imx_rpmsg_dt_ids[] = {
+	{ .compatible = "fsl,imx6sx-rpmsg",  .data = (void *)IMX6SX, },
+	{ .compatible = "fsl,imx7d-rpmsg",   .data = (void *)IMX7D, },
+	{ .compatible = "fsl,imx7ulp-rpmsg", .data = (void *)IMX7ULP, },
+	{ .compatible = "cvitek,rpmsg", .data = (void *)IMX7ULP, },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, imx_rpmsg_dt_ids);
+
+static int set_vring_phy_buf(struct platform_device *pdev,
+		       struct imx_rpmsg_vproc *rpdev, int vdev_nums)
 {
-	int ret;
+	struct resource *res;
+	resource_size_t size;
+	unsigned int start, end;
+	int i, ret = 0;
 
-	ret = alloc_chrdev_region(&rpmsg_major, 0, RPMSG_DEV_MAX, "rpmsg");
-	if (ret < 0) {
-		pr_err("rpmsg: failed to allocate char dev region\n");
-		return ret;
-	}
-
-	rpmsg_class = class_create(THIS_MODULE, "rpmsg");
-	if (IS_ERR(rpmsg_class)) {
-		pr_err("failed to create rpmsg class\n");
-		unregister_chrdev_region(rpmsg_major, RPMSG_DEV_MAX);
-		return PTR_ERR(rpmsg_class);
-	}
-
-	ret = register_rpmsg_driver(&rpmsg_chrdev_driver);
-	if (ret < 0) {
-		pr_err("rpmsgchr: failed to register rpmsg driver\n");
-		class_destroy(rpmsg_class);
-		unregister_chrdev_region(rpmsg_major, RPMSG_DEV_MAX);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (res) {
+		size = resource_size(res);
+		start = res->start;
+		end = res->start + size;
+		for (i = 0; i < vdev_nums; i++) {
+			rpdev->ivdev[i].vring[0] = start;
+			rpdev->ivdev[i].vring[1] = start +
+						   0x8000;
+			start += 0x10000;
+			if (start > end) {
+				pr_err("Too small memory size %x!\n",
+						(u32)size);
+				ret = -EINVAL;
+				break;
+			}
+		}
+	} else {
+		return -ENOMEM;
 	}
 
 	return ret;
 }
-postcore_initcall(rpmsg_char_init);
 
-static void rpmsg_chrdev_exit(void)
+static void rpmsg_work_handler(struct work_struct *work)
 {
-	unregister_rpmsg_driver(&rpmsg_chrdev_driver);
-	class_destroy(rpmsg_class);
-	unregister_chrdev_region(rpmsg_major, RPMSG_DEV_MAX);
-}
-module_exit(rpmsg_chrdev_exit);
+	u32 message;
+	unsigned long flags;
 
-MODULE_ALIAS("rpmsg:rpmsg_chrdev");
+	spin_lock_irqsave(&mu_lock, flags);
+	/* handle all incoming mu message */
+	while (in_idx != out_idx) {
+		message = m4_message[out_idx % MAX_NUM];
+		spin_unlock_irqrestore(&mu_lock, flags);
+
+		blocking_notifier_call_chain(&(mu_rpmsg_box.notifier), 4,
+						(void *)(phys_addr_t)message);
+
+		spin_lock_irqsave(&mu_lock, flags);
+		m4_message[out_idx % MAX_NUM] = 0;
+		out_idx++;
+	}
+	spin_unlock_irqrestore(&mu_lock, flags);
+}
+
+static irqreturn_t imx_mu_rpmsg_isr(int irq, void *param)
+{
+	u32 message;
+	unsigned long flags;
+
+
+	/* RPMSG */
+	if (true) {
+		spin_lock_irqsave(&mu_lock, flags);
+		
+		
+		/* get message from receive buffer */
+		// MU_ReceiveMsg(mu_base, 1, &message);
+		// m4_message[in_idx % MAX_NUM] = message;
+		cmdqu_t *cmdq = rtos_cmdqu_receive();
+		
+		in_idx++;
+		/*
+		 * Too many mu message not be handled in timely, can enlarge
+		 * MAX_NUM
+		 */
+		if (in_idx == out_idx) {
+			spin_unlock_irqrestore(&mu_lock, flags);
+			pr_err("MU overflow!\n");
+			return IRQ_HANDLED;
+		}
+
+		spin_unlock_irqrestore(&mu_lock, flags);
+
+		schedule_delayed_work(&rpmsg_work, 0);
+	}
+
+	return IRQ_HANDLED;
+}
+
+static int imx_rpmsg_probe(struct platform_device *pdev)
+{
+	pr_info("probe rpmsg device\n");
+	int i, j, ret = 0;
+	u32 irq;
+	struct clk *clk;
+	struct device_node *np_mu;
+	struct device *dev = &pdev->dev;
+	struct device_node *np = pdev->dev.of_node;
+	static void __iomem *mu_base;
+
+	/* Initialize the mu unit used by rpmsg */
+	np_mu = of_find_compatible_node(NULL, NULL, "cvitek,rtos_cmdqu");
+	if (!np_mu)
+		pr_info("Cannot find MU-RPMSG entry in device tree\n");
+	mu_base = of_iomap(np_mu, 0);
+	WARN_ON(!mu_base);
+
+	irq = of_irq_get(np_mu, 0);
+
+	int err = request_irq( irq , imx_mu_rpmsg_isr, 0, "mailbox", dev);
+
+	if (err) {
+		pr_err("fail to register interrupt handler: %d \n", err);
+		return -1;
+	}
+
+	if (variant == IMX7D) {
+		clk = of_clk_get(np_mu, 0);
+		if (IS_ERR(clk)) {
+			pr_err("mu clock source missing or invalid\n");
+			return PTR_ERR(clk);
+		}
+		ret = clk_prepare_enable(clk);
+		if (ret) {
+			pr_err("unable to enable mu clock\n");
+			return ret;
+		}
+	}
+
+	INIT_DELAYED_WORK(&rpmsg_work, rpmsg_work_handler);
+	/*
+	 * bit26 is used by rpmsg channels.
+	 * bit0 of MX7ULP_MU_CR used to let m4 to know MU is ready now
+	 
+	if (variant == IMX7ULP) {
+		MU_EnableRxFullInt(mu_base, 1);
+		MU_SetFn(mu_base, 1);
+	} else {
+		MU_EnableRxFullInt(mu_base, 1);
+	}
+	*/
+	BLOCKING_INIT_NOTIFIER_HEAD(&(mu_rpmsg_box.notifier));
+
+	pr_info("MU is ready for cross core communication!\n");
+
+	for (i = 0; i < ARRAY_SIZE(imx_rpmsg_vprocs); i++) {
+		struct imx_rpmsg_vproc *rpdev = &imx_rpmsg_vprocs[i];
+
+		ret = of_property_read_u32_index(np, "vdev-nums", i,
+			&rpdev->vdev_nums);
+		if (ret)
+			rpdev->vdev_nums = 1;
+		if (rpdev->vdev_nums > MAX_VDEV_NUMS) {
+			pr_err("vdev-nums exceed the max %d\n", MAX_VDEV_NUMS);
+			return -EINVAL;
+		}
+
+		if (!strcmp(rpdev->rproc_name, "m4")) {
+			ret = set_vring_phy_buf(pdev, rpdev,
+						rpdev->vdev_nums);
+			if (ret) {
+				pr_err("No vring buffer.\n");
+				return -ENOMEM;
+			}
+		} else {
+			pr_err("No remote m4 processor.\n");
+			return -ENODEV;
+		}
+
+		for (j = 0; j < rpdev->vdev_nums; j++) {
+			pr_info("%s rpdev%d vdev%d: vring0 0x%x, vring1 0x%x\n",
+				 __func__, i, rpdev->vdev_nums,
+				 rpdev->ivdev[j].vring[0],
+				 rpdev->ivdev[j].vring[1]);
+			rpdev->ivdev[j].vdev.id.device = VIRTIO_ID_RPMSG;
+			rpdev->ivdev[j].vdev.config = &imx_rpmsg_config_ops;
+			rpdev->ivdev[j].vdev.dev.parent = &pdev->dev;
+			rpdev->ivdev[j].vdev.dev.release = imx_rpmsg_vproc_release;
+			rpdev->ivdev[j].base_vq_id = j * 2;
+
+			ret = register_virtio_device(&rpdev->ivdev[j].vdev);
+			if (ret) {
+				pr_err("%s failed to register rpdev: %d\n",
+						__func__, ret);
+				return ret;
+			}
+
+		}
+	}
+
+	return ret;
+}
+
+static struct platform_driver imx_rpmsg_driver = {
+	.driver = {
+		   .owner = THIS_MODULE,
+		   .name = "imx-rpmsg",
+		   .of_match_table = imx_rpmsg_dt_ids,
+		   },
+	.probe = imx_rpmsg_probe,
+};
+
+static int __init imx_rpmsg_init(void)
+{
+	int ret;
+	pr_info("imx imx imx imx imx imx.\n");
+
+	ret = platform_driver_register(&imx_rpmsg_driver);
+	if (ret)
+		pr_err("Unable to initialize rpmsg driver\n");
+	else
+		pr_info("imx rpmsg driver is registered.\n");
+
+	return ret;
+}
+
+MODULE_AUTHOR("Freescale Semiconductor, Inc.");
+MODULE_DESCRIPTION("iMX remote processor messaging virtio device");
 MODULE_LICENSE("GPL v2");
+late_initcall(imx_rpmsg_init);

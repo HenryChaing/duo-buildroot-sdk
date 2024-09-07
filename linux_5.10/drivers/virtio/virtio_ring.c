@@ -412,7 +412,7 @@ static struct vring_desc *alloc_indirect_split(struct virtqueue *_vq,
 	return desc;
 }
 
-static inline int virtqueue_add_split(struct virtqueue *_vq,
+static int virtqueue_add_split(struct virtqueue *_vq,
 				      struct scatterlist *sgs[],
 				      unsigned int total_sg,
 				      unsigned int out_sgs,
@@ -458,6 +458,7 @@ static inline int virtqueue_add_split(struct virtqueue *_vq,
 		i = 0;
 		descs_used = 1;
 	} else {
+		pr_info("desc == NULL\n");
 		indirect = false;
 		desc = vq->split.vring.desc;
 		i = head;
@@ -491,15 +492,21 @@ static inline int virtqueue_add_split(struct virtqueue *_vq,
 			i = virtio16_to_cpu(_vq->vdev, desc[i].next);
 		}
 	}
+	sg = sgs[n];
 	for (; n < (out_sgs + in_sgs); n++) {
 		for (sg = sgs[n]; sg; sg = sg_next(sg)) {
+			// pr_info("split sg->pagelink= 0x%x \n", sg->page_link);
+			
+			pr_info("split n=%d \n", n);
 			dma_addr_t addr = vring_map_one_sg(vq, sg, DMA_FROM_DEVICE);
+			// pr_info("split addr=%pad \n", addr);
 			if (vring_mapping_error(vq, addr))
 				goto unmap_release;
-
-			desc[i].flags = cpu_to_virtio16(_vq->vdev, VRING_DESC_F_NEXT | VRING_DESC_F_WRITE);
+			
+			desc[i].flags = cpu_to_virtio16(_vq->vdev, VRING_DESC_F_NEXT | VRING_DESC_F_WRITE);			
 			desc[i].addr = cpu_to_virtio64(_vq->vdev, addr);
-			desc[i].len = cpu_to_virtio32(_vq->vdev, sg->length);
+			desc[i].len = cpu_to_virtio32(_vq->vdev, sg->length );
+		
 			prev = i;
 			i = virtio16_to_cpu(_vq->vdev, desc[i].next);
 		}
@@ -1690,7 +1697,7 @@ err_ring:
  * Generic functions and exported symbols.
  */
 
-static inline int virtqueue_add(struct virtqueue *_vq,
+static int virtqueue_add(struct virtqueue *_vq,
 				struct scatterlist *sgs[],
 				unsigned int total_sg,
 				unsigned int out_sgs,
@@ -2068,9 +2075,13 @@ struct virtqueue *__vring_new_virtqueue(unsigned int index,
 	if (virtio_has_feature(vdev, VIRTIO_F_RING_PACKED))
 		return NULL;
 
+	pr_info("virtio_ring 2071\n");
+
 	vq = kmalloc(sizeof(*vq), GFP_KERNEL);
 	if (!vq)
 		return NULL;
+
+	pr_info("virtio_ring 2077\n");
 
 	vq->packed_ring = false;
 	vq->vq.callback = callback;
@@ -2112,6 +2123,8 @@ struct virtqueue *__vring_new_virtqueue(unsigned int index,
 					vq->split.avail_flags_shadow);
 	}
 
+	pr_info("virtio_ring 2119\n");
+
 	vq->split.desc_state = kmalloc_array(vring.num,
 			sizeof(struct vring_desc_state_split), GFP_KERNEL);
 	if (!vq->split.desc_state) {
@@ -2119,12 +2132,16 @@ struct virtqueue *__vring_new_virtqueue(unsigned int index,
 		return NULL;
 	}
 
+	pr_info("virtio_ring 2122\n");
+
 	/* Put everything in free lists. */
 	vq->free_head = 0;
 	for (i = 0; i < vring.num-1; i++)
 		vq->split.vring.desc[i].next = cpu_to_virtio16(vdev, i + 1);
 	memset(vq->split.desc_state, 0, vring.num *
 			sizeof(struct vring_desc_state_split));
+
+	pr_info("virtio_ring 2129\n");
 
 	list_add_tail(&vq->vq.list, &vdev->vqs);
 	return &vq->vq;
@@ -2171,6 +2188,8 @@ struct virtqueue *vring_new_virtqueue(unsigned int index,
 
 	if (virtio_has_feature(vdev, VIRTIO_F_RING_PACKED))
 		return NULL;
+
+	pr_info("virtio_ring 2185\n");
 
 	vring_init(&vring, num, pages, vring_align);
 	return __vring_new_virtqueue(index, vring, vdev, weak_barriers, context,

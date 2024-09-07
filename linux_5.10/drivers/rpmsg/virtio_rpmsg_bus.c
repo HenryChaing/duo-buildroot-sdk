@@ -11,6 +11,12 @@
 
 #define pr_fmt(fmt) "%s: " fmt, __func__
 
+#define dma_alloc_coherent_imx(d, s, hp, f) ({ \
+	void *__dma_alloc_coherent_p = kmalloc((s), (f)); \
+	*(hp) = (unsigned long)__dma_alloc_coherent_p; \
+	__dma_alloc_coherent_p; \
+})
+
 #include <linux/dma-mapping.h>
 #include <linux/idr.h>
 #include <linux/jiffies.h>
@@ -208,9 +214,13 @@ rpmsg_sg_init(struct scatterlist *sg, void *cpu_addr, unsigned int len)
 		sg_init_table(sg, 1);
 		sg_set_page(sg, vmalloc_to_page(cpu_addr), len,
 			    offset_in_page(cpu_addr));
+
+		pr_info("virtio_rpmsg_bus: 212\n");
 	} else {
 		WARN_ON(!virt_addr_valid(cpu_addr));
 		sg_init_one(sg, cpu_addr, len);
+
+		pr_info("virtio_rpmsg_bus: 217\n");
 	}
 }
 
@@ -240,6 +250,8 @@ static struct rpmsg_endpoint *__rpmsg_create_ept(struct virtproc_info *vrp,
 						 rpmsg_rx_cb_t cb,
 						 void *priv, u32 addr)
 {
+	pr_info("__rpmsg_create_ept 253\n");
+	
 	int id_min, id_max, id;
 	struct rpmsg_endpoint *ept;
 	struct device *dev = rpdev ? &rpdev->dev : &vrp->vdev->dev;
@@ -267,12 +279,17 @@ static struct rpmsg_endpoint *__rpmsg_create_ept(struct virtproc_info *vrp,
 
 	mutex_lock(&vrp->endpoints_lock);
 
+	pr_info("__rpmsg_create_ept 282\n");
+
 	/* bind the endpoint to an rpmsg address (and allocate one if needed) */
 	id = idr_alloc(&vrp->endpoints, ept, id_min, id_max, GFP_KERNEL);
 	if (id < 0) {
 		dev_err(dev, "idr_alloc failed: %d\n", id);
 		goto free_ept;
 	}
+
+	pr_info("__rpmsg_create_ept 291\n");
+
 	ept->addr = id;
 
 	mutex_unlock(&vrp->endpoints_lock);
@@ -921,16 +938,19 @@ static int rpmsg_probe(struct virtio_device *vdev)
 
 	total_buf_space = vrp->num_bufs * vrp->buf_size;
 
+	pr_info("virtio_rpmsg num_bufs = %d\n", vrp->num_bufs);
+
 	/* allocate coherent memory for the buffers */
-	bufs_va = dma_alloc_coherent(vdev->dev.parent,
+	bufs_va = dma_alloc_coherent_imx(vdev->dev.parent,
 				     total_buf_space, &vrp->bufs_dma,
 				     GFP_KERNEL);
 	if (!bufs_va) {
 		err = -ENOMEM;
+		pr_info("virtio_rpmsg 934\n");
 		goto vqs_del;
 	}
 
-	dev_dbg(&vdev->dev, "buffers: va %pK, dma %pad\n",
+	pr_info("buffers: va %pK, dma %pad\n",
 		bufs_va, &vrp->bufs_dma);
 
 	/* half of the buffers is dedicated for RX */
@@ -944,7 +964,11 @@ static int rpmsg_probe(struct virtio_device *vdev)
 		struct scatterlist sg;
 		void *cpu_addr = vrp->rbufs + i * vrp->buf_size;
 
+		pr_info("cpu_addr: %p\n",cpu_addr);
+
 		rpmsg_sg_init(&sg, cpu_addr, vrp->buf_size);
+
+		pr_info("sg: %p\n",sg);
 
 		err = virtqueue_add_inbuf(vrp->rvq, &sg, 1, cpu_addr,
 					  GFP_KERNEL);
