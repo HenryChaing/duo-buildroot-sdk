@@ -264,7 +264,7 @@ static __poll_t rpmsg_eptdev_poll(struct file *filp, poll_table *wait)
 	if (!skb_queue_empty(&eptdev->queue))
 		mask |= EPOLLIN | EPOLLRDNORM;
 
-	mask |= rpmsg_poll(eptdev->ept, filp, wait);
+	// mask |= rpmsg_poll(eptdev->ept, filp, wait);
 
 	return mask;
 }
@@ -473,6 +473,9 @@ static int rpmsg_chrdev_probe(struct rpmsg_device *rpdev)
 		return -ENOMEM;
 
 	ctrldev->rpdev = rpdev;
+
+	pr_info("Linux Recieve data from ThreadX\n");
+	pr_info("Linux Recieve data from ThreadX\n");
 
 	dev = &ctrldev->dev;
 	device_initialize(dev);
