@@ -33,6 +33,11 @@
 #include <linux/virtio_ids.h>
 #include <linux/virtio_config.h>
 #include <linux/wait.h>
+#include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
+#include <linux/notifier.h>
 
 #include "rpmsg_internal.h"
 
@@ -870,6 +875,8 @@ static int rpmsg_ns_cb(struct rpmsg_device *rpdev, void *data, int len,
 		return -EINVAL;
 	}
 
+	pr_info("line 873\n");
+
 	/* don't trust the remote processor for null terminating the name */
 	msg->name[RPMSG_NAME_SIZE - 1] = '\0';
 
@@ -894,6 +901,35 @@ static int rpmsg_ns_cb(struct rpmsg_device *rpdev, void *data, int len,
 	return 0;
 }
 
+#if (0)
+struct virtio_device *vdev_isr = NULL;
+
+struct imx_virdev {
+	struct virtio_device vdev;
+	unsigned int vring[2];
+	struct virtqueue *vq[2];
+	int base_vq_id;
+	int num_of_vqs;
+	struct notifier_block nb;
+};
+
+#define to_imx_virdev(vd) container_of(vd, struct imx_virdev, vdev)
+
+static irqreturn_t imx_mu_rpmsg_isr(int irq, void *param)
+{
+	u32 message;
+	unsigned long flags;
+
+	pr_info("Linux Recieve data from ThreadX\n");
+	pr_info("Linux Recieve data from ThreadX\n");
+
+	// struct imx_virdev *imx_virdev_inst = container_of(vdev_isr, struct imx_virdev, vdev);
+	// imx_virdev_inst->vq[0]->callback(imx_virdev_inst->vq[0]);
+
+	return IRQ_HANDLED;
+}
+#endif
+
 static int rpmsg_probe(struct virtio_device *vdev)
 {
 	vq_callback_t *vq_cbs[] = { rpmsg_recv_done, rpmsg_xmit_done };
@@ -915,6 +951,25 @@ static int rpmsg_probe(struct virtio_device *vdev)
 	mutex_init(&vrp->endpoints_lock);
 	mutex_init(&vrp->tx_lock);
 	init_waitqueue_head(&vrp->sendq);
+
+	/* Initialize the mu unit used by rpmsg */
+	struct device_node *np_mu;
+	static void __iomem *mu_base;
+	u32 irq;
+	np_mu = of_find_compatible_node(NULL, NULL, "cvitek,rtos_cmdqu");
+	if (!np_mu)
+		pr_info("Cannot find MU-RPMSG entry in device tree\n");
+	mu_base = of_iomap(np_mu, 0);
+	WARN_ON(!mu_base);
+
+	irq = of_irq_get(np_mu, 0);
+
+	// err = request_irq( irq , imx_mu_rpmsg_isr, 0, "mailbox", vdev);
+
+	if (err) {
+		pr_err("fail to register interrupt handler: %d \n", err);
+		return -1;
+	}
 
 	/* We expect two virtqueues, rx and tx (and in this order) */
 	err = virtio_find_vqs(vdev, 2, vqs, vq_cbs, names, NULL);
@@ -981,7 +1036,7 @@ static int rpmsg_probe(struct virtio_device *vdev)
 	vdev->priv = vrp;
 
 	/* if supported by the remote processor, enable the name service */
-	if (virtio_has_feature(vdev, VIRTIO_RPMSG_F_NS)) {
+	if (/*virtio_has_feature(vdev, VIRTIO_RPMSG_F_NS)*/true) {
 		/* a dedicated endpoint handles the name service msgs */
 		vrp->ns_ept = __rpmsg_create_ept(vrp, NULL, rpmsg_ns_cb,
 						vrp, RPMSG_NS_ADDR);

@@ -5,6 +5,12 @@
 #include <string.h>
 #include <delay_timer.h>
 #include <rom_api.h>
+#include <cv181x_pinlist_swconfig.h>
+#include <cv181x_reg_fmux_gpio.h>
+#define PINMUX_CONFIG(PIN_NAME, FUNC_NAME) \
+	mmio_clrsetbits_32(PINMUX_BASE + FMUX_GPIO_FUNCSEL_##PIN_NAME, \
+		FMUX_GPIO_FUNCSEL_##PIN_NAME##_MASK << FMUX_GPIO_FUNCSEL_##PIN_NAME##_OFFSET, \
+		PIN_NAME##__##FUNC_NAME)
 
 #ifdef RTOS_ENABLE_FREERTOS
 int init_comm_info(int ret)
@@ -112,6 +118,27 @@ void bl2_main(void)
 	mode = CLK_ND;
 #endif
 #endif
+
+	/* pinmux was set for jtag by default */
+	// UART1
+	PINMUX_CONFIG(IIC0_SCL, CV_SCL0__CR_4WTDI);         // GP0
+	PINMUX_CONFIG(IIC0_SDA, CV_SDA0__CR_4WTDO);         // GP1
+
+	// PWM
+	PINMUX_CONFIG(JTAG_CPU_TMS, CV_2WTMS_CR_4WTMS);        // GP2
+	PINMUX_CONFIG(JTAG_CPU_TCK, CV_2WTCK_CR_4WTCK);        // GP3
+
+		/* If GP15's value is high, enter debug mode. */
+	if (mmio_read_32(GPIO_BASE + 0x050) & (1 << 15)) {
+		NOTICE("=========================================\n");
+		NOTICE("||             Debug Mode              ||\n");
+		NOTICE("||                                     ||\n");
+		NOTICE("=========================================\n");
+		mmio_setbits_32(0x3003024, 1 << 6);	/* reset the small core */
+
+		while(1);
+	}
+
 	load_rest(mode);
 	NOTICE("BL2 end.\n");
 

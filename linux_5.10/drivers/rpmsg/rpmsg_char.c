@@ -35,6 +35,8 @@
 #include <asm-generic/io.h>
 #include <linux/rtos_cmdqu.h>
 #include <linux/miscdevice.h>
+#include "cvi_mailbox.h"
+#include "rtos_cmdqu.h"
 
 enum imx_rpmsg_variants {
 	IMX6SX,
@@ -76,9 +78,10 @@ static u32 m4_message[MAX_NUM];
 static u32 in_idx, out_idx;
 static DEFINE_SPINLOCK(mu_lock);
 static struct delayed_work rpmsg_work;
+struct virtio_device *vdev_isr = NULL;
 
+static __u64  reg_base;
 volatile struct mailbox_set_register *mbox_reg_rpmsg;
-volatile struct mailbox_done_register *mbox_done_reg_rpmsg;
 volatile unsigned long *mailbox_context_rpmsg; // mailbox buffer context is 64 Bytess
 
 /*
@@ -295,10 +298,10 @@ static struct virtqueue *rp_find_vq(struct virtio_device *vdev,
 
 	memset(rpvq->addr, 0, RPMSG_RING_SIZE);
 
-	pr_info("vring%d: phys 0x%x, virt 0x%p\n", index, virdev->vring[index],
+	pr_info("vring%d: phys 0x%x, virt 0x%x\n", index, virdev->vring[index],
 					rpvq->addr);
 
-	vq = vring_new_virtqueue(index, RPMSG_NUM_BUFS, RPMSG_VRING_ALIGN,
+	vq = vring_new_virtqueue(index, /*RPMSG_NUM_BUFS*/2, RPMSG_VRING_ALIGN,
 			vdev, true, true, rpvq->addr, imx_rpmsg_notify, callback,
 			name);
 	if (!vq) {
@@ -467,6 +470,10 @@ static void rpmsg_work_handler(struct work_struct *work)
 	u32 message;
 	unsigned long flags;
 
+	// virtqueue callback
+	struct imx_virdev *imx_virdev_inst = container_of(vdev_isr, struct imx_virdev, vdev);
+	imx_virdev_inst->vq[0]->callback(imx_virdev_inst->vq[0]);
+
 	spin_lock_irqsave(&mu_lock, flags);
 	/* handle all incoming mu message */
 	while (in_idx != out_idx) {
@@ -488,16 +495,19 @@ static irqreturn_t imx_mu_rpmsg_isr(int irq, void *param)
 	u32 message;
 	unsigned long flags;
 
+	pr_info("Linux Recieve data from ThreadX\n");
+	pr_info("Linux Recieve data from ThreadX\n");
 
 	/* RPMSG */
 	if (true) {
 		spin_lock_irqsave(&mu_lock, flags);
 		
-		
 		/* get message from receive buffer */
 		// MU_ReceiveMsg(mu_base, 1, &message);
 		// m4_message[in_idx % MAX_NUM] = message;
 		cmdqu_t *cmdq = rtos_cmdqu_receive();
+
+		pr_info("cmd id : %d\n",cmdq->cmd_id);
 		
 		in_idx++;
 		/*
@@ -529,6 +539,7 @@ static int imx_rpmsg_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	static void __iomem *mu_base;
 
+
 	/* Initialize the mu unit used by rpmsg */
 	np_mu = of_find_compatible_node(NULL, NULL, "cvitek,rtos_cmdqu");
 	if (!np_mu)
@@ -538,12 +549,12 @@ static int imx_rpmsg_probe(struct platform_device *pdev)
 
 	irq = of_irq_get(np_mu, 0);
 
-	int err = request_irq( irq , imx_mu_rpmsg_isr, 0, "mailbox", dev);
-
-	if (err) {
-		pr_err("fail to register interrupt handler: %d \n", err);
-		return -1;
-	}
+#if (0)
+#endif
+	struct resource *res;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	reg_base = (__u64)devm_ioremap(&pdev->dev, res->start,
+		res->end - res->start);
 
 	if (variant == IMX7D) {
 		clk = of_clk_get(np_mu, 0);
@@ -616,7 +627,16 @@ static int imx_rpmsg_probe(struct platform_device *pdev)
 				return ret;
 			}
 
+			vdev_isr = &rpdev->ivdev[j].vdev;
+
 		}
+	}
+
+	int err = request_irq( irq , imx_mu_rpmsg_isr, 0, "mailbox", dev);
+
+	if (err) {
+		pr_err("fail to register interrupt handler: %d \n", err);
+		return -1;
 	}
 
 	return ret;
@@ -641,6 +661,9 @@ static int __init imx_rpmsg_init(void)
 		pr_err("Unable to initialize rpmsg driver\n");
 	else
 		pr_info("imx rpmsg driver is registered.\n");
+
+	mbox_reg_rpmsg = (struct mailbox_set_register *) reg_base;
+	mailbox_context_rpmsg = (unsigned long *) (reg_base + MAILBOX_CONTEXT_OFFSET);//mailbox_context_rpmsg;
 
 	return ret;
 }

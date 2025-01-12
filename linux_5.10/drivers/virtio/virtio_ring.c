@@ -12,6 +12,9 @@
 #include <linux/hrtimer.h>
 #include <linux/dma-mapping.h>
 #include <xen/xen.h>
+#include <asm/io.h>
+#include <linux/delay.h>
+
 
 #ifdef DEBUG
 /* For development, we want to crash whenever the ring is screwed. */
@@ -500,8 +503,11 @@ static int virtqueue_add_split(struct virtqueue *_vq,
 			pr_info("split n=%d \n", n);
 			dma_addr_t addr = vring_map_one_sg(vq, sg, DMA_FROM_DEVICE);
 			// pr_info("split addr=%pad \n", addr);
-			if (vring_mapping_error(vq, addr))
+			if (vring_mapping_error(vq, addr)){
+				pr_info("virtio_ring line 504 \n", n);
 				goto unmap_release;
+			}
+				
 			
 			desc[i].flags = cpu_to_virtio16(_vq->vdev, VRING_DESC_F_NEXT | VRING_DESC_F_WRITE);			
 			desc[i].addr = cpu_to_virtio64(_vq->vdev, addr);
@@ -519,8 +525,11 @@ static int virtqueue_add_split(struct virtqueue *_vq,
 		dma_addr_t addr = vring_map_single(
 			vq, desc, total_sg * sizeof(struct vring_desc),
 			DMA_TO_DEVICE);
-		if (vring_mapping_error(vq, addr))
+		if (vring_mapping_error(vq, addr)){
+			pr_info("virtio_ring line 526 \n", n);
 			goto unmap_release;
+		}
+			
 
 		vq->split.vring.desc[head].flags = cpu_to_virtio16(_vq->vdev,
 				VRING_DESC_F_INDIRECT);
@@ -561,7 +570,11 @@ static int virtqueue_add_split(struct virtqueue *_vq,
 						vq->split.avail_idx_shadow);
 	vq->num_added++;
 
-	pr_debug("Added buffer head %i to %p\n", head, vq);
+	writew(vq->split.avail_idx_shadow,&(vq->split.vring.avail->idx));
+
+	pr_info("virt_to_phys physical address 0x%x 0x%x \n", &(vq->split.vring), &(vq->split.vring.avail->idx));
+	pr_info("vq->split.vring.avail->idx %d\n", vq->split.vring.avail->idx);
+	pr_info("Added buffer head %i to %p\n", head, vq);
 	END_USE(vq);
 
 	/* This is very unlikely, but theoretically possible.  Kick
@@ -572,6 +585,7 @@ static int virtqueue_add_split(struct virtqueue *_vq,
 	return 0;
 
 unmap_release:
+	pr_info("unmap_release\n");
 	err_idx = i;
 
 	if (indirect)
@@ -678,6 +692,8 @@ static void detach_buf_split(struct vring_virtqueue *vq, unsigned int head,
 
 static inline bool more_used_split(const struct vring_virtqueue *vq)
 {
+	pr_info("(vq->last_used_idx, vq->split.vring.used->idx) : (%x , %x)\n", &(vq->last_used_idx), &(vq->split.vring.used->idx));
+	pr_info("(vq->last_used_idx, vq->split.vring.used->idx) : (%d , %d)\n", vq->last_used_idx, readw(&(vq->split.vring.used->idx)));
 	return vq->last_used_idx != virtio16_to_cpu(vq->vq.vdev,
 			vq->split.vring.used->idx);
 }
@@ -686,6 +702,7 @@ static void *virtqueue_get_buf_ctx_split(struct virtqueue *_vq,
 					 unsigned int *len,
 					 void **ctx)
 {
+	pr_info("virtio_ring line 689\n");
 	struct vring_virtqueue *vq = to_vvq(_vq);
 	void *ret;
 	unsigned int i;
@@ -694,24 +711,31 @@ static void *virtqueue_get_buf_ctx_split(struct virtqueue *_vq,
 	START_USE(vq);
 
 	if (unlikely(vq->broken)) {
+		pr_info("virtio_ring line 698\n");
 		END_USE(vq);
 		return NULL;
 	}
 
+	pr_info("virtio_ring line 703\n");
+
 	if (!more_used_split(vq)) {
-		pr_debug("No more buffers in queue\n");
+		pr_info("No more buffers in queue\n");
 		END_USE(vq);
 		return NULL;
 	}
+
+	pr_info("virtio_ring line 711\n");
 
 	/* Only get used array entries after they have been exposed by host. */
 	virtio_rmb(vq->weak_barriers);
-
+	pr_info("virtio_ring line 715\n");
 	last_used = (vq->last_used_idx & (vq->split.vring.num - 1));
 	i = virtio32_to_cpu(_vq->vdev,
 			vq->split.vring.used->ring[last_used].id);
 	*len = virtio32_to_cpu(_vq->vdev,
 			vq->split.vring.used->ring[last_used].len);
+
+	pr_info("(i, len) = (%d, %d)\n", i, len);
 
 	if (unlikely(i >= vq->split.vring.num)) {
 		BAD_RING(vq, "id %u out of range\n", i);
@@ -737,6 +761,8 @@ static void *virtqueue_get_buf_ctx_split(struct virtqueue *_vq,
 	LAST_ADD_TIME_INVALID(vq);
 
 	END_USE(vq);
+
+	pr_info ("virtio_ring line 753\n");
 	return ret;
 }
 
@@ -1354,6 +1380,8 @@ static void *virtqueue_get_buf_ctx_packed(struct virtqueue *_vq,
 					  unsigned int *len,
 					  void **ctx)
 {
+	pr_info("virtio_ring line 1361\n");
+	
 	struct vring_virtqueue *vq = to_vvq(_vq);
 	u16 last_used, id;
 	void *ret;
@@ -1377,6 +1405,8 @@ static void *virtqueue_get_buf_ctx_packed(struct virtqueue *_vq,
 	last_used = vq->last_used_idx;
 	id = le16_to_cpu(vq->packed.vring.desc[last_used].id);
 	*len = le32_to_cpu(vq->packed.vring.desc[last_used].len);
+
+	pr_info("virtio_ring line 1385\n");
 
 	if (unlikely(id >= vq->packed.vring.num)) {
 		BAD_RING(vq, "id %u out of range\n", id);
@@ -1854,6 +1884,7 @@ bool virtqueue_notify(struct virtqueue *_vq)
 
 	/* Prod other side to tell it about changes. */
 	if (!vq->notify(_vq)) {
+		pr_info("virtio_ring line 1867\n");
 		vq->broken = true;
 		return false;
 	}
@@ -1901,7 +1932,9 @@ EXPORT_SYMBOL_GPL(virtqueue_kick);
 void *virtqueue_get_buf_ctx(struct virtqueue *_vq, unsigned int *len,
 			    void **ctx)
 {
+	pr_info("virtio_ring line 1910\n");
 	struct vring_virtqueue *vq = to_vvq(_vq);
+	pr_info("virtio_ring line 1912\n");
 
 	return vq->packed_ring ? virtqueue_get_buf_ctx_packed(_vq, len, ctx) :
 				 virtqueue_get_buf_ctx_split(_vq, len, ctx);
@@ -1910,6 +1943,9 @@ EXPORT_SYMBOL_GPL(virtqueue_get_buf_ctx);
 
 void *virtqueue_get_buf(struct virtqueue *_vq, unsigned int *len)
 {
+	pr_info("virtio_ring line 1919\n");
+	void *pt = 0;
+	*pt;
 	return virtqueue_get_buf_ctx(_vq, len, NULL);
 }
 EXPORT_SYMBOL_GPL(virtqueue_get_buf);
@@ -2192,6 +2228,9 @@ struct virtqueue *vring_new_virtqueue(unsigned int index,
 	pr_info("virtio_ring 2185\n");
 
 	vring_init(&vring, num, pages, vring_align);
+
+	pr_info("virtio_ring line 2217 (0x%x)\n",&(vring.used->idx));
+
 	return __vring_new_virtqueue(index, vring, vdev, weak_barriers, context,
 				     notify, callback, name);
 }

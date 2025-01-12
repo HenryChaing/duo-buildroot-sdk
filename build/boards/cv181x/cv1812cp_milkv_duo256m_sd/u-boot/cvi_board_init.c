@@ -6,6 +6,7 @@ int cvi_board_init(void)
 	PINMUX_CONFIG(PAD_MIPI_TXP0, CAM_MCLK0);   // Sensor MCLK
 	PINMUX_CONFIG(PAD_MIPI_TXP2, XGPIOC_17);   // Sensor RESET
 
+#if (0)
 	// UART1
 	PINMUX_CONFIG(IIC0_SCL, UART1_TX);         // GP0
 	PINMUX_CONFIG(IIC0_SDA, UART1_RX);         // GP1
@@ -13,6 +14,15 @@ int cvi_board_init(void)
 	// PWM
 	PINMUX_CONFIG(JTAG_CPU_TMS, PWM_7);        // GP2
 	PINMUX_CONFIG(JTAG_CPU_TCK, PWM_6);        // GP3
+#else
+	// UART1
+	PINMUX_CONFIG(IIC0_SCL, CV_SCL0__CR_4WTDI);         // GP0
+	PINMUX_CONFIG(IIC0_SDA, CV_SDA0__CR_4WTDO);         // GP1
+
+	// PWM
+	PINMUX_CONFIG(JTAG_CPU_TMS, CV_2WTMS_CR_4WTMS);        // GP2
+	PINMUX_CONFIG(JTAG_CPU_TCK, CV_2WTCK_CR_4WTCK);        // GP3
+#endif
 
 	// I2C1
 	PINMUX_CONFIG(SD1_D2, IIC1_SCL);           // GP4
