@@ -40,6 +40,6 @@ enum SYSTEM_CMD_TYPE {
 
 int rtos_cmdqu_send(cmdqu_t *cmdq);
 int rtos_cmdqu_send_wait(cmdqu_t *cmdq, int wait_cmd_id);
-cmdqu_t *rtos_cmdqu_receive (void);
+int rtos_cmdqu_receive (void);
 
 #endif  // end of __RTOS_COMMAND_QUEUE__

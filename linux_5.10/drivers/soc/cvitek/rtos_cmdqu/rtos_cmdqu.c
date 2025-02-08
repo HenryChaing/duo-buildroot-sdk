@@ -140,22 +140,18 @@ irqreturn_t rtos_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-cmdqu_t *rtos_cmdqu_receive (void) {
+int rtos_cmdqu_receive (void) {
 
 	char set_val, done_val;
 	int i;
 	int flags;
 	cmdqu_t *cmdq;
+	cmdqu_t rtos_cmdq;
 
 	struct rtos_cmdqu_wait_list_t *wait_list;
 	struct list_head *pos;
 
 	drv_spin_lock_irqsave(&mailbox_lock, flags);
-	if (flags == MAILBOX_LOCK_FAILED) {
-		pr_err("drv_spin_lock_irqsave failed!\n");
-		//must clear irq?
-		return IRQ_HANDLED;
-	}
 	// pr_info("rtos_irq_handler irq=%d\n", irq);
 	set_val = mbox_reg->cpu_mbox_set[RECEIVE_CPU].cpu_mbox_int_int.mbox_int;
 	done_val = mbox_done_reg->cpu_mbox_done[RECEIVE_CPU].cpu_mbox_int_int.mbox_int;
@@ -191,6 +187,8 @@ cmdqu_t *rtos_cmdqu_receive (void) {
 			pr_debug("cmdq->block =%d\n", linux_cmdq.block);
 			pr_debug("cmdq->linux_valid =%d\n", linux_cmdq.resv.valid.linux_valid);
 			pr_debug("cmdq->rtos_valid =%x", linux_cmdq.resv.valid.rtos_valid);
+			drv_spin_unlock_irqrestore(&mailbox_lock, flags);
+			return linux_cmdq.cmd_id;
 			if (linux_cmdq.resv.valid.rtos_valid == 1 &&
 				linux_cmdq.block == 1) {
 				// dewait
@@ -220,7 +218,8 @@ cmdqu_t *rtos_cmdqu_receive (void) {
 		}
 	}
 	drv_spin_unlock_irqrestore(&mailbox_lock, flags);
-	return cmdq;
+	rtos_cmdq = *cmdq;
+	return rtos_cmdq.cmd_id;
 }
 
 long rtos_cmdqu_init(void)

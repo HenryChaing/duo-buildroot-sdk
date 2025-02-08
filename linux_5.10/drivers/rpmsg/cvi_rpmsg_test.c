@@ -111,6 +111,7 @@ volatile unsigned long *mailbox_context_rpmsg; // mailbox buffer context is 64 B
 struct imx_rpmsg_vq_info {
 	__u16 num;	/* number of entries in the virtio_ring */
 	__u16 vq_id;	/* a globaly unique index of this virtqueue */
+	__u16 simple_id;
 	void *addr;	/* address where we mapped the virtio ring */
 	struct imx_rpmsg_vproc *rpdev;
 };
@@ -193,6 +194,7 @@ static bool imx_rpmsg_notify(struct virtqueue *vq)
 	unsigned int mu_rpmsg = 0;
 	struct imx_rpmsg_vq_info *rpvq = vq->priv;
 
+	int queue_id = rpvq->simple_id;
 	mu_rpmsg = rpvq->vq_id << 16;
 	mutex_lock(&rpvq->rpdev->lock);
 
@@ -200,6 +202,7 @@ static bool imx_rpmsg_notify(struct virtqueue *vq)
 	// MU_SendMessage(mu_base, 1, mu_rpmsg);
 	struct cmdqu_t cmd = {0};
     cmd.param_ptr = mu_rpmsg;
+	cmd.cmd_id = queue_id;
 	rtos_cmdqu_send(&cmd);
 
 	mutex_unlock(&rpvq->rpdev->lock);
@@ -315,6 +318,7 @@ static struct virtqueue *rp_find_vq(struct virtio_device *vdev,
 	/* system-wide unique id for this virtqueue */
 	rpvq->vq_id = virdev->base_vq_id + index;
 	rpvq->rpdev = rpdev;
+	rpvq->simple_id = index;
 	mutex_init(&rpdev->lock);
 
 	pr_info("rpmsg_char 309\n");
@@ -465,6 +469,8 @@ static int set_vring_phy_buf(struct platform_device *pdev,
 	return ret;
 }
 
+static int rtos_cmd_id;
+
 static void rpmsg_work_handler(struct work_struct *work)
 {
 	u32 message;
@@ -472,7 +478,7 @@ static void rpmsg_work_handler(struct work_struct *work)
 
 	// virtqueue callback
 	struct imx_virdev *imx_virdev_inst = container_of(vdev_isr, struct imx_virdev, vdev);
-	imx_virdev_inst->vq[0]->callback(imx_virdev_inst->vq[0]);
+	imx_virdev_inst->vq[rtos_cmd_id]->callback(imx_virdev_inst->vq[rtos_cmd_id]);
 
 	spin_lock_irqsave(&mu_lock, flags);
 	/* handle all incoming mu message */
@@ -505,9 +511,9 @@ static irqreturn_t imx_mu_rpmsg_isr(int irq, void *param)
 		/* get message from receive buffer */
 		// MU_ReceiveMsg(mu_base, 1, &message);
 		// m4_message[in_idx % MAX_NUM] = message;
-		cmdqu_t *cmdq = rtos_cmdqu_receive();
+		rtos_cmd_id = rtos_cmdqu_receive();
 
-		pr_info("cmd id : %d\n",cmdq->cmd_id);
+		pr_info("cmd id : %d\n",rtos_cmd_id);
 		
 		in_idx++;
 		/*
