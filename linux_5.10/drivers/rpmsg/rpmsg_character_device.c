@@ -171,10 +171,14 @@ static ssize_t rpmsg_eptdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	struct sk_buff *skb;
 	int use;
 
+	pr_info("read_iter\n");
+
 	if (!eptdev->ept)
 		return -EPIPE;
 
 	spin_lock_irqsave(&eptdev->queue_lock, flags);
+
+	pr_info ("rpmsg_test_dev. line 181 \n");
 
 	/* Wait for data in the queue */
 	if (skb_queue_empty(&eptdev->queue)) {
@@ -183,27 +187,38 @@ static ssize_t rpmsg_eptdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		if (filp->f_flags & O_NONBLOCK)
 			return -EAGAIN;
 
+		pr_info ("rpmsg_test_dev. line 190 \n");
 		/* Wait until we get data or the endpoint goes away */
 		if (wait_event_interruptible(eptdev->readq,
 					     !skb_queue_empty(&eptdev->queue) ||
 					     !eptdev->ept))
 			return -ERESTARTSYS;
 
+		pr_info ("rpmsg_test_dev. line 197 \n");
 		/* We lost the endpoint while waiting */
 		if (!eptdev->ept)
 			return -EPIPE;
 
+		pr_info ("rpmsg_test_dev. line 202 \n");
+
 		spin_lock_irqsave(&eptdev->queue_lock, flags);
 	}
+
+	pr_info ("rpmsg_test_dev. line 203 \n");
 
 	skb = skb_dequeue(&eptdev->queue);
 	spin_unlock_irqrestore(&eptdev->queue_lock, flags);
 	if (!skb)
 		return -EFAULT;
 
+	pr_info ("rpmsg_test_dev. line 210 \n");
+
 	use = min_t(size_t, iov_iter_count(to), skb->len);
 	if (copy_to_iter(skb->data, use, to) != use)
 		use = -EFAULT;
+
+	pr_info("%s\n",skb->data);
+	pr_info ("rpmsg_test_dev. line 216 \n");
 
 	kfree_skb(skb);
 
@@ -213,6 +228,7 @@ static ssize_t rpmsg_eptdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 static ssize_t rpmsg_eptdev_write_iter(struct kiocb *iocb,
 				       struct iov_iter *from)
 {
+	pr_info("write_iter\n");
 	struct file *filp = iocb->ki_filp;
 	struct rpmsg_eptdev *eptdev = filp->private_data;
 	size_t len = iov_iter_count(from);
@@ -238,10 +254,15 @@ static ssize_t rpmsg_eptdev_write_iter(struct kiocb *iocb,
 		goto unlock_eptdev;
 	}
 
-	if (filp->f_flags & O_NONBLOCK)
+	if (filp->f_flags & O_NONBLOCK) {
+		pr_info ("rpmsg_eptdev_write_iter rpmsg_trysend \n");
 		ret = rpmsg_trysend(eptdev->ept, kbuf, len);
-	else
+	}
+	else {
+		pr_info ("rpmsg_eptdev_write_iter rpmsg_send \n");
 		ret = rpmsg_send(eptdev->ept, kbuf, len);
+	}
+		
 
 unlock_eptdev:
 	mutex_unlock(&eptdev->ept_lock);
@@ -538,9 +559,14 @@ static void rpmsg_chrdev_remove(struct rpmsg_device *rpdev)
 	put_device(&ctrldev->dev);
 }
 
+#include <linux/mod_devicetable.h>
+
+struct rpmsg_device_id rpmsg_device_id_inst;
+
 static struct rpmsg_driver rpmsg_chrdev_driver = {
 	.probe = rpmsg_chrdev_probe,
 	.remove = rpmsg_chrdev_remove,
+	.id_table = &rpmsg_device_id_inst,
 	.drv = {
 		.name = "rpmsg_chrdev",
 	},
@@ -550,6 +576,10 @@ static int rpmsg_char_init(void)
 {
 	int ret;
 
+	pr_info ("rpmsg_test_dev. line 553 \n");
+
+	memcpy(rpmsg_device_id_inst.name,"rpmsg_chrdev",13);
+	
 	ret = alloc_chrdev_region(&rpmsg_major, 0, RPMSG_DEV_MAX, "rpmsg");
 	if (ret < 0) {
 		pr_err("rpmsg: failed to allocate char dev region\n");
@@ -569,6 +599,8 @@ static int rpmsg_char_init(void)
 		class_destroy(rpmsg_class);
 		unregister_chrdev_region(rpmsg_major, RPMSG_DEV_MAX);
 	}
+
+	pr_info ("rpmsg_test_dev. line 575 \n");
 
 	return ret;
 }

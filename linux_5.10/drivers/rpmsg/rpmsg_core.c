@@ -132,6 +132,7 @@ EXPORT_SYMBOL(rpmsg_send);
  */
 int rpmsg_sendto(struct rpmsg_endpoint *ept, void *data, int len, u32 dst)
 {
+	pr_info("------- rpmsg_core send_to -------\n");
 	return ept->ops->sendto(ept, data, len, dst);
 }
 EXPORT_SYMBOL(rpmsg_sendto);
@@ -304,7 +305,8 @@ static struct device_attribute rpmsg_dev_attrs[] = {
 static inline int rpmsg_id_match(const struct rpmsg_device *rpdev,
 				  const struct rpmsg_device_id *id)
 {
-	return strncmp(id->name, rpdev->id.name, RPMSG_NAME_SIZE) == 0;
+	pr_info("(%s,%s)\n", id->name, rpdev->id.name);
+	return strncmp(id->name, rpdev->id.name, 13 /*RPMSG_NAME_SIZE*/) == 0;
 }
 
 /* match rpmsg channel and rpmsg driver */
@@ -315,11 +317,14 @@ static int rpmsg_dev_match(struct device *dev, struct device_driver *drv)
 	const struct rpmsg_device_id *ids = rpdrv->id_table;
 	unsigned int i;
 
+	pr_info("---------------- rpmsg_core rpmsg_dev_match -------\n");
+
 	if (ids)
 		for (i = 0; ids[i].name[0]; i++)
 			if (rpmsg_id_match(rpdev, &ids[i]))
 				return 1;
 
+	pr_info("---------------- rpmsg_core rpmsg_dev_match not-------\n");
 	return of_driver_match_device(dev, drv);
 }
 
@@ -368,8 +373,11 @@ static int rpmsg_dev_probe(struct device *dev)
 		goto out;
 	}
 
-	if (rpdev->ops->announce_create)
+	if (rpdev->ops->announce_create) {
 		err = rpdev->ops->announce_create(rpdev);
+		pr_info("rpdev announce result: %d\n", err);
+	}
+
 out:
 	return err;
 }
@@ -419,7 +427,7 @@ int rpmsg_register_device(struct rpmsg_device *rpdev)
 
 	ret = device_register(&rpdev->dev);
 	if (ret) {
-		dev_err(dev, "device_register failed: %d\n", ret);
+		pr_info("device_register failed: %d\n", ret);
 		put_device(&rpdev->dev);
 	}
 
