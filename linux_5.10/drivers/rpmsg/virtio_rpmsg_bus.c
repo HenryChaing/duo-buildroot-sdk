@@ -101,7 +101,7 @@ struct rpmsg_hdr {
 	__virtio32 reserved;
 	__virtio16 len;
 	__virtio16 flags;
-	u8 data[];
+	char data[64];
 } __packed;
 
 /**
@@ -357,18 +357,21 @@ static int virtio_rpmsg_announce_create(struct rpmsg_device *rpdev)
 	struct device *dev = &rpdev->dev;
 	int err = 0;
 
+	pr_info("virtio_rpmsg_announce_create 360\n");
+
 	/* need to tell remote processor's name service about this channel ? */
-	if (rpdev->announce && rpdev->ept &&
-	    virtio_has_feature(vrp->vdev, VIRTIO_RPMSG_F_NS)) {
+	if (rpdev->announce && rpdev->ept /*&&
+	    virtio_has_feature(vrp->vdev, VIRTIO_RPMSG_F_NS)*/) {
 		struct rpmsg_ns_msg nsm;
 
+		pr_info("virtio_rpmsg_announce_create 367\n");
 		strncpy(nsm.name, rpdev->id.name, RPMSG_NAME_SIZE);
 		nsm.addr = cpu_to_virtio32(vrp->vdev, rpdev->ept->addr);
 		nsm.flags = cpu_to_virtio32(vrp->vdev, RPMSG_NS_CREATE);
 
 		err = rpmsg_sendto(rpdev->ept, &nsm, sizeof(nsm), RPMSG_NS_ADDR);
 		if (err)
-			dev_err(dev, "failed to announce service %d\n", err);
+			pr_info("failed to announce service %d\n", err);
 	}
 
 	return err;
@@ -461,6 +464,8 @@ static struct rpmsg_device *rpmsg_create_channel(struct virtproc_info *vrp,
 	ret = rpmsg_register_device(rpdev);
 	if (ret)
 		return NULL;
+
+	pr_info ("virtio_rpmsg_bus line 465 \n");
 
 	return rpdev;
 }
@@ -583,6 +588,7 @@ static int rpmsg_send_offchannel_raw(struct rpmsg_device *rpdev,
 				     u32 src, u32 dst,
 				     void *data, int len, bool wait)
 {
+	pr_info ("rpmsg_send_offchannel_raw line 591 \n");
 	struct virtio_rpmsg_channel *vch = to_virtio_rpmsg_channel(rpdev);
 	struct virtproc_info *vrp = vch->vrp;
 	struct device *dev = &rpdev->dev;
@@ -735,11 +741,12 @@ static int rpmsg_recv_single(struct virtproc_info *vrp, struct device *dev,
 	unsigned int msg_len = virtio16_to_cpu(vrp->vdev, msg->len);
 	int err;
 
-	dev_dbg(dev, "From: 0x%x, To: 0x%x, Len: %d, Flags: %d, Reserved: %d\n",
+	pr_info("From: 0x%x, To: 0x%x, Len: %d, Flags: %d, Reserved: %d, Data: %s\n",
 		virtio32_to_cpu(vrp->vdev, msg->src),
 		virtio32_to_cpu(vrp->vdev, msg->dst), msg_len,
 		virtio16_to_cpu(vrp->vdev, msg->flags),
-		virtio32_to_cpu(vrp->vdev, msg->reserved));
+		virtio32_to_cpu(vrp->vdev, msg->reserved),
+		msg->data);
 #if defined(CONFIG_DYNAMIC_DEBUG)
 	dynamic_hex_dump("rpmsg_virtio RX: ", DUMP_PREFIX_NONE, 16, 1,
 			 msg, sizeof(*msg) + msg_len, true);
@@ -751,7 +758,7 @@ static int rpmsg_recv_single(struct virtproc_info *vrp, struct device *dev,
 	 */
 	if (len > vrp->buf_size ||
 	    msg_len > (len - sizeof(struct rpmsg_hdr))) {
-		dev_warn(dev, "inbound msg too big: (%d, %d)\n", len, msg_len);
+		pr_info("inbound msg too big: (%d, %d)\n", len, msg_len);
 		return -EINVAL;
 	}
 
@@ -759,6 +766,8 @@ static int rpmsg_recv_single(struct virtproc_info *vrp, struct device *dev,
 	mutex_lock(&vrp->endpoints_lock);
 
 	ept = idr_find(&vrp->endpoints, virtio32_to_cpu(vrp->vdev, msg->dst));
+
+	pr_info("virtio_rpmsg_bus: 765\n");
 
 	/* let's make sure no one deallocates ept while we use it */
 	if (ept)
@@ -770,16 +779,22 @@ static int rpmsg_recv_single(struct virtproc_info *vrp, struct device *dev,
 		/* make sure ept->cb doesn't go away while we use it */
 		mutex_lock(&ept->cb_lock);
 
-		if (ept->cb)
+		pr_info("virtio_rpmsg_bus: 777\n");
+
+		if (ept->cb) {
+			pr_info("virtio_rpmsg_bus: 780\n");
 			ept->cb(ept->rpdev, msg->data, msg_len, ept->priv,
 				virtio32_to_cpu(vrp->vdev, msg->src));
+			pr_info("virtio_rpmsg_bus: 783\n");
+		}
+			
 
 		mutex_unlock(&ept->cb_lock);
 
 		/* farewell, ept, we don't need you anymore */
 		kref_put(&ept->refcount, __ept_release);
 	} else
-		dev_warn(dev, "msg received with no recipient\n");
+		pr_info("msg received with no recipient\n");
 
 	/* publish the real size of the buffer */
 	rpmsg_sg_init(&sg, msg, vrp->buf_size);
@@ -837,7 +852,7 @@ static void rpmsg_xmit_done(struct virtqueue *svq)
 {
 	struct virtproc_info *vrp = svq->vdev->priv;
 
-	dev_dbg(&svq->vdev->dev, "%s\n", __func__);
+	pr_info("%s\n", __func__);
 
 	/* wake up potential senders that are waiting for a tx buffer */
 	wake_up_interruptible(&vrp->sendq);

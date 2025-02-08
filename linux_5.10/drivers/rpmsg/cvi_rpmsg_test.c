@@ -304,7 +304,7 @@ static struct virtqueue *rp_find_vq(struct virtio_device *vdev,
 	pr_info("vring%d: phys 0x%x, virt 0x%x\n", index, virdev->vring[index],
 					rpvq->addr);
 
-	vq = vring_new_virtqueue(index, /*RPMSG_NUM_BUFS*/2, RPMSG_VRING_ALIGN,
+	vq = vring_new_virtqueue(index, RPMSG_NUM_BUFS/*2*/, RPMSG_VRING_ALIGN,
 			vdev, true, true, rpvq->addr, imx_rpmsg_notify, callback,
 			name);
 	if (!vq) {
