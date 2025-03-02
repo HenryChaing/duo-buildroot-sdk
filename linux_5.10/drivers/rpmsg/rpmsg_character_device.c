@@ -260,7 +260,7 @@ static ssize_t rpmsg_eptdev_write_iter(struct kiocb *iocb,
 	}
 	else {
 		pr_info ("rpmsg_eptdev_write_iter rpmsg_send \n");
-		ret = rpmsg_send(eptdev->ept, kbuf, len);
+		ret = rpmsg_sendto(eptdev->ept, kbuf, len, eptdev->chinfo.dst);
 	}
 		
 
