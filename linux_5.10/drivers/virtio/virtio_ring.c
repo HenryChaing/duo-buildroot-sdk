@@ -500,7 +500,6 @@ static int virtqueue_add_split(struct virtqueue *_vq,
 		for (sg = sgs[n]; sg; sg = sg_next(sg)) {
 			// pr_info("split sg->pagelink= 0x%x \n", sg->page_link);
 			
-			pr_info("split n=%d \n", n);
 			dma_addr_t addr = vring_map_one_sg(vq, sg, DMA_FROM_DEVICE);
 			// pr_info("split addr=%pad \n", addr);
 			if (vring_mapping_error(vq, addr)){
@@ -572,9 +571,6 @@ static int virtqueue_add_split(struct virtqueue *_vq,
 
 	writew(vq->split.avail_idx_shadow,&(vq->split.vring.avail->idx));
 
-	pr_info("virt_to_phys physical address 0x%x 0x%x \n", &(vq->split.vring), &(vq->split.vring.avail->idx));
-	pr_info("vq->split.vring.avail->idx %d\n", vq->split.vring.avail->idx);
-	pr_info("Added buffer head %i to %p\n", head, vq);
 	END_USE(vq);
 
 	/* This is very unlikely, but theoretically possible.  Kick
@@ -1944,8 +1940,6 @@ EXPORT_SYMBOL_GPL(virtqueue_get_buf_ctx);
 void *virtqueue_get_buf(struct virtqueue *_vq, unsigned int *len)
 {
 	pr_info("virtio_ring line 1919\n");
-	void *pt = 0;
-	*pt;
 	return virtqueue_get_buf_ctx(_vq, len, NULL);
 }
 EXPORT_SYMBOL_GPL(virtqueue_get_buf);
