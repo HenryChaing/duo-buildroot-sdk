@@ -26,7 +26,8 @@
 #include <linux/rpmsg.h>
 #include <linux/slab.h>
 #include <linux/virtio.h>
-#include <linux/virtio_config_imx.h>
+// #include <linux/virtio_config_imx.h>
+#include <linux/virtio_config.h>
 #include <linux/virtio_ids.h>
 #include <linux/virtio_ring.h>
 #include <linux/imx_rpmsg.h>
@@ -83,6 +84,7 @@ struct virtio_device *vdev_isr = NULL;
 static __u64  reg_base;
 volatile struct mailbox_set_register *mbox_reg_rpmsg;
 volatile unsigned long *mailbox_context_rpmsg; // mailbox buffer context is 64 Bytess
+static struct resource *virtqueue_res;
 
 /*
  * For now, allocate 256 buffers of 512 bytes for each side. each buffer
@@ -357,10 +359,14 @@ static void imx_rpmsg_del_vqs(struct virtio_device *vdev)
 
 // rpmsg_probe -> virtio_find_vqs
 
-static int imx_rpmsg_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
-		       struct virtqueue *vqs[],
-		       vq_callback_t *callbacks[],
-		       const char * const names[])
+static int imx_rpmsg_find_vqs (struct virtio_device *vdev, unsigned nvqs,
+			struct virtqueue *vqs[], vq_callback_t *callbacks[],
+			const char * const names[], const bool *ctx,
+			struct irq_affinity *desc)
+// static int imx_rpmsg_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
+// 		       struct virtqueue *vqs[],
+// 		       vq_callback_t *callbacks[],
+// 		       const char * const names[])
 {
 	struct imx_virdev *virdev = to_imx_virdev(vdev);
 	struct imx_rpmsg_vproc *rpdev = to_imx_rpdev(virdev,
@@ -412,6 +418,14 @@ static void imx_rpmsg_vproc_release(struct device *dev)
 	/* this handler is provided so driver core doesn't yell at us */
 }
 
+static bool imx_rpmsg_get_shm_region(struct virtio_device *vdev,
+			       struct virtio_shm_region *region, u8 id) {
+
+	region->addr = (uint64_t)ioremap(virtqueue_res->start, virtqueue_res->end - virtqueue_res->start);
+	pr_info("region->addr: (%x)\n", region->addr);
+	return 0;
+}
+
 static struct virtio_config_ops imx_rpmsg_config_ops = {
 	.get_features	= imx_rpmsg_get_features,
 	.finalize_features = imx_rpmsg_finalize_features,
@@ -420,6 +434,7 @@ static struct virtio_config_ops imx_rpmsg_config_ops = {
 	.reset		= imx_rpmsg_reset,
 	.set_status	= imx_rpmsg_set_status,
 	.get_status	= imx_rpmsg_get_status,
+	.get_shm_region = imx_rpmsg_get_shm_region,
 };
 
 static struct imx_rpmsg_vproc imx_rpmsg_vprocs[] = {
@@ -445,6 +460,11 @@ static int set_vring_phy_buf(struct platform_device *pdev,
 	unsigned int start, end;
 	int i, ret = 0;
 
+	virtqueue_res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+	if (virtqueue_res) {
+		pr_info("virtqueue_res: (%x, %x)\n",virtqueue_res->start, virtqueue_res->end);
+		// return -ENOMEM;
+	}
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (res) {
 		size = resource_size(res);

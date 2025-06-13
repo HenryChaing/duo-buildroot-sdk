@@ -220,12 +220,10 @@ rpmsg_sg_init(struct scatterlist *sg, void *cpu_addr, unsigned int len)
 		sg_set_page(sg, vmalloc_to_page(cpu_addr), len,
 			    offset_in_page(cpu_addr));
 
-		pr_info("virtio_rpmsg_bus: 212\n");
 	} else {
 		WARN_ON(!virt_addr_valid(cpu_addr));
 		sg_init_one(sg, cpu_addr, len);
 
-		pr_info("virtio_rpmsg_bus: 217\n");
 	}
 }
 
@@ -1020,8 +1018,12 @@ static int rpmsg_probe(struct virtio_device *vdev)
 		goto vqs_del;
 	}
 
-	pr_info("buffers: va %pK, dma %pad\n",
-		bufs_va, &vrp->bufs_dma);
+	/* We expect two virtqueues, rx and tx (and in this order) */
+	struct virtio_shm_region region = {0};
+	err = virtio_get_shm_region(vdev, &region, 1);
+	if (err)
+		goto free_vrp;
+	bufs_va = (void *)region.addr;
 
 	/* half of the buffers is dedicated for RX */
 	vrp->rbufs = bufs_va;
@@ -1034,11 +1036,7 @@ static int rpmsg_probe(struct virtio_device *vdev)
 		struct scatterlist sg;
 		void *cpu_addr = vrp->rbufs + i * vrp->buf_size;
 
-		pr_info("cpu_addr: %p\n",cpu_addr);
-
 		rpmsg_sg_init(&sg, cpu_addr, vrp->buf_size);
-
-		pr_info("sg: %p\n",sg);
 
 		err = virtqueue_add_inbuf(vrp->rvq, &sg, 1, cpu_addr,
 					  GFP_KERNEL);

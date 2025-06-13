@@ -306,7 +306,7 @@ static inline int rpmsg_id_match(const struct rpmsg_device *rpdev,
 				  const struct rpmsg_device_id *id)
 {
 	pr_info("(%s,%s)\n", id->name, rpdev->id.name);
-	return strncmp(id->name, rpdev->id.name, 13 /*RPMSG_NAME_SIZE*/) == 0;
+	return strcmp(id->name, rpdev->id.name) == 0;
 }
 
 /* match rpmsg channel and rpmsg driver */
@@ -373,10 +373,10 @@ static int rpmsg_dev_probe(struct device *dev)
 		goto out;
 	}
 
-	if (rpdev->ops->announce_create) {
-		err = rpdev->ops->announce_create(rpdev);
-		pr_info("rpdev announce result: %d\n", err);
-	}
+	// if (rpdev->ops->announce_create) {
+	// 	err = rpdev->ops->announce_create(rpdev);
+	// 	pr_info("rpdev announce result: %d\n", err);
+	// }
 
 out:
 	return err;

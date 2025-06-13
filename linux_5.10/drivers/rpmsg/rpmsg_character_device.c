@@ -495,9 +495,6 @@ static int rpmsg_chrdev_probe(struct rpmsg_device *rpdev)
 
 	ctrldev->rpdev = rpdev;
 
-	pr_info("Linux Recieve data from ThreadX\n");
-	pr_info("Linux Recieve data from ThreadX\n");
-
 	dev = &ctrldev->dev;
 	device_initialize(dev);
 	dev->parent = &rpdev->dev;
@@ -561,24 +558,22 @@ static void rpmsg_chrdev_remove(struct rpmsg_device *rpdev)
 
 #include <linux/mod_devicetable.h>
 
-struct rpmsg_device_id rpmsg_device_id_inst;
+struct rpmsg_device_id rpmsg_device_id_inst[] = {
+	{ .name	= "rpmsg-raw" },
+	{ .name	= "rpmsg-sg2002-c906l-channel" },
+	{ },
+};
 
 static struct rpmsg_driver rpmsg_chrdev_driver = {
 	.probe = rpmsg_chrdev_probe,
 	.remove = rpmsg_chrdev_remove,
-	.id_table = &rpmsg_device_id_inst,
-	.drv = {
-		.name = "rpmsg_chrdev",
-	},
+	.id_table = rpmsg_device_id_inst,
+	.drv.name = "rpmsg_chrdev",
 };
 
 static int rpmsg_char_init(void)
 {
 	int ret;
-
-	pr_info ("rpmsg_test_dev. line 553 \n");
-
-	memcpy(rpmsg_device_id_inst.name,"rpmsg_chrdev",13);
 	
 	ret = alloc_chrdev_region(&rpmsg_major, 0, RPMSG_DEV_MAX, "rpmsg");
 	if (ret < 0) {
@@ -600,7 +595,6 @@ static int rpmsg_char_init(void)
 		unregister_chrdev_region(rpmsg_major, RPMSG_DEV_MAX);
 	}
 
-	pr_info ("rpmsg_test_dev. line 575 \n");
 
 	return ret;
 }
